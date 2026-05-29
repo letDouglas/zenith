@@ -1,0 +1,22 @@
+# Kubernetes / K3d
+.kube/
+kubeconfig*
+k3d-*.yaml.tmp
+
+# Logs & temporary files
+*.log
+*.tmp
+*.bak
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Environment variables
+.env
+.env.local
+.env.*
+
+# Helm / Charts / ArgoCD artifacts
+charts/
+tmp/

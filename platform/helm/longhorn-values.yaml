@@ -1,0 +1,5 @@
+helmPreUpgradeCheckerJob:
+  enabled: false
+defaultSettings:
+  defaultDataPath: /var/lib/longhorn 
+  defaultReplicaCount: 1 # Only for testing purposes, not recommended for production

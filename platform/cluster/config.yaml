@@ -1,0 +1,8 @@
+cluster:
+  name: zenith
+  driver: multipass
+  nodes: 3
+  memory: 4G
+  cpus: 2
+  diskSize: 20G
+  kubernetesVersion: v1.27.4
