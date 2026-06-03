@@ -9,6 +9,8 @@ spec:
     repoURL: https://github.com/letDouglas/zenith.git
     targetRevision: feat/cnpg
     path: platform/argocd-apps
+    plugin:
+      name: argocd-repo-server
   destination:
     server: https://kubernetes.default.svc
     namespace: argocd
