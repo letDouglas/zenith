@@ -1,3 +1,25 @@
 kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d; echo
 
 kubectl port-forward -n argocd svc/argocd-server 8080:443
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: zenith-postgres
+  namespace: argocd
+spec:
+  project: default
+  source:
+    # 1. Puntiamo al TUO repository personale
+    repoURL: 'git@github.com:letDouglas/zenith.git' # O l'URL HTTPS se non hai configurato le chiavi SSH su Argo
+    # 2. Diciamo ad ArgoCD di leggere ESATTAMENTE dal tuo branch di feature!
+    targetRevision: feat/cnpg 
+    # 3. Diciamo ad ArgoCD in quale cartella del repo deve cercare i file
+    path: platform/manifests/database
+  destination:
+    server: 'https://kubernetes.default.svc'
+    namespace: cnpg-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
