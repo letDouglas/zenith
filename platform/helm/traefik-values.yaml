@@ -1,0 +1,8 @@
+deployment:
+  replicas: 2
+service:
+  annotations:
+    io.cilium/lb-ipam-ips: "192.168.64.241" 
+ingressClass:
+  enabled: true
+  name: traefik-internal

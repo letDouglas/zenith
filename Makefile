@@ -2,14 +2,16 @@ CLUSTER_NAME     = zenith
 K3S_VERSION      = v1.27.4+k3s1
 CILIUM_VERSION   = 1.14.3
 LONGHORN_VERSION = 1.5.1
+TRAEFIK_VERSION  = 26.0.0
 KUBECONFIG_ZENITH = $(HOME)/.kube/clusters/zenith
+ARGOCD_VERSION   = 5.46.7 # Versione della chart Helm
 
 .PHONY: bootstrap destroy
 
 destroy:
 	multipass delete zenith-1 zenith-2 zenith-3 --purge || true
 
-bootstrap: vms-create k3s-install longhorn-prereq cilium-install cluster-wait longhorn-install
+bootstrap: vms-create k3s-install longhorn-prereq cilium-install cilium-config cluster-wait longhorn-install traefik-install
 	@echo ""
 	@echo "✅ Bootstrap completo — esegui: switch zenith"
 
@@ -29,7 +31,7 @@ k3s-install:
 		--disable=servicelb \
 		--cluster-init"
 	@echo "==> Attendo token..."
-	@until multipass exec zenith-–1 -- sudo test -f /var/lib/rancher/k3s/server/node-token; \
+	@until multipass exec zenith-1 -- sudo test -f /var/lib/rancher/k3s/server/node-token; \
 		do sleep 2; done
 	@TOKEN=$$(multipass exec zenith-1 -- sudo cat /var/lib/rancher/k3s/server/node-token); \
 		multipass exec zenith-2 -- bash -c \
@@ -58,6 +60,9 @@ cilium-install:
 		--set k8sServicePort=6443 \
 		--wait --timeout=120s
 
+cilium-config:
+	KUBECONFIG=$(KUBECONFIG_ZENITH) kubectl apply -f platform/manifests/cilium-ipam.yaml
+
 cluster-wait:
 	KUBECONFIG=$(KUBECONFIG_ZENITH) kubectl wait node --all --for=condition=Ready --timeout=180s
 
@@ -70,3 +75,24 @@ longhorn-install:
 		--create-namespace \
 		--values platform/helm/longhorn-values.yaml \
 		--wait --timeout=300s
+
+traefik-install:
+	helm repo add traefik https://traefik.github.io/charts 2>/dev/null || true
+	helm repo update traefik
+	KUBECONFIG=$(KUBECONFIG_ZENITH) helm upgrade --install traefik traefik/traefik \
+	  --version $(TRAEFIK_VERSION) \
+	  --namespace ingress-system \
+	  --create-namespace \
+	  --values platform/helm/traefik-values.yaml \
+	  --wait --timeout=120s
+
+argocd-install:
+	helm repo add argo https://argoproj.github.io/argo-helm 2>/dev/null || true
+	helm repo update argo
+	KUBECONFIG=$(KUBECONFIG_ZENITH) helm upgrade --install argocd argo/argo-cd \
+	  --version $(ARGOCD_VERSION) \
+	  --namespace argocd \
+	  --create-namespace \
+	  --set server.extraArgs={--insecure} \
+	  --set configs.cm.timeout\.reconciliation=10s \
+	  --wait --timeout=120s
