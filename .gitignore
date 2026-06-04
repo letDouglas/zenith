@@ -14,8 +14,6 @@ Thumbs.db
 
 # Environment variables
 .env
-.env.local
-.env.*
 
 # Helm / Charts / ArgoCD artifacts
 charts/

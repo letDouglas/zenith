@@ -1,19 +1,27 @@
+-include .env
+export
+
 CLUSTER_NAME     = zenith
 K3S_VERSION      = v1.27.4+k3s1
 CILIUM_VERSION   = 1.14.3
 LONGHORN_VERSION = 1.5.1
 TRAEFIK_VERSION  = 26.0.0
 KUBECONFIG_ZENITH = $(HOME)/.kube/clusters/zenith
-ARGOCD_VERSION   = 5.46.7 # Versione della chart Helm
+ARGOCD_VERSION   = 5.46.7
+
+GITHUB_TOKEN ?= $(error Imposta GITHUB_TOKEN in .env)
+GITHUB_USER  ?= $(error Imposta GITHUB_USER in .env)
+GITHUB_REPO  ?= $(error Imposta GITHUB_REPO in .env)
 
 .PHONY: bootstrap destroy
 
 destroy:
 	multipass delete zenith-1 zenith-2 zenith-3 --purge || true
 
-bootstrap: vms-create k3s-install longhorn-prereq cilium-install cilium-config cluster-wait longhorn-install traefik-install
+bootstrap: vms-create k3s-install longhorn-prereq cilium-install cilium-config cluster-wait longhorn-install traefik-install argocd-install argocd-bootstrap
 	@echo ""
 	@echo "✅ Bootstrap completo — esegui: switch zenith"
+
 
 vms-create:
 	multipass launch --name zenith-1 --cpus 2 --memory 4G --disk 20G
@@ -94,5 +102,17 @@ argocd-install:
 	  --namespace argocd \
 	  --create-namespace \
 	  --set server.extraArgs={--insecure} \
-	  --set configs.cm.timeout\.reconciliation=10s \
+	  --set configs.cm."timeout.reconciliation"=10s \
 	  --wait --timeout=120s
+
+argocd-bootstrap:
+	KUBECONFIG=$(KUBECONFIG_ZENITH) kubectl create namespace cnpg-system --dry-run=client -o yaml | KUBECONFIG=$(KUBECONFIG_ZENITH) kubectl apply -f -
+	KUBECONFIG=$(KUBECONFIG_ZENITH) kubectl create secret generic github-creds \
+		--namespace argocd \
+		--from-literal=username=$(GITHUB_USER) \
+		--from-literal=password=$(GITHUB_TOKEN) \
+		--from-literal=url=$(GITHUB_REPO) \
+		--dry-run=client -o yaml | KUBECONFIG=$(KUBECONFIG_ZENITH) kubectl apply -f -
+	KUBECONFIG=$(KUBECONFIG_ZENITH) kubectl label secret github-creds -n argocd \
+		argocd.argoproj.io/secret-type=repository --overwrite
+	KUBECONFIG=$(KUBECONFIG_ZENITH) kubectl apply -f platform/argocd-apps/root-app.yaml -n argocd
