@@ -1,0 +1,19 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: postgres-database
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/letDouglas/zenith.git
+    targetRevision: dev 
+    path: platform/manifests/database
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: database
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    createNamespace: true
