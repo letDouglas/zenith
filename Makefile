@@ -101,8 +101,7 @@ argocd-install:
 	  --version $(ARGOCD_VERSION) \
 	  --namespace argocd \
 	  --create-namespace \
-	  --set server.extraArgs={--insecure} \
-	  --set configs.cm."timeout.reconciliation"=10s \
+	  --values platform/helm/argocd-values.yaml \
 	  --wait --timeout=120s
 
 argocd-bootstrap:

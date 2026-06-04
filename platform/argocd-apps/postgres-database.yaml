@@ -7,7 +7,7 @@ spec:
   project: default
   source:
     repoURL: https://github.com/letDouglas/zenith.git
-    targetRevision: dev 
+    targetRevision: dev
     path: platform/manifests/database
   destination:
     server: https://kubernetes.default.svc
@@ -16,4 +16,5 @@ spec:
     automated:
       prune: true
       selfHeal: true
-    createNamespace: true
+    syncOptions:
+      - CreateNamespace=true
