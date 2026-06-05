@@ -1,0 +1,49 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: vault-bootstrap
+  namespace: vault
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: HookSucceeded
+spec:
+  template:
+    spec:
+      containers:
+      - name: vault-bootstrap
+        image: hashicorp/vault:1.15.2
+        env:
+        - name: VAULT_ADDR
+          value: http://vault-internal.vault.svc.cluster.local:8200
+        - name: VAULT_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: vault-root-token
+              key: token
+        command:
+        - /bin/sh
+        - -c
+        - |
+          echo "Enabling Kubernetes Auth..."
+          vault auth enable kubernetes || true
+
+          echo "Configuring Kubernetes Auth..."
+          vault write auth/kubernetes/config \
+            kubernetes_host=https://kubernetes.default.svc:443 \
+            kubernetes_ca_cert=@/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+
+          echo "Creating Database Policy..."
+          vault policy write database-policy - <<EOF
+          path "secret/data/postgres-credentials" {
+            capabilities = ["read"]
+          }
+          EOF
+
+          echo "Creating ESO Role..."
+          vault write auth/kubernetes/role/database-role \
+            bound_service_account_names=vault-auth-sa \
+            bound_service_account_namespaces=database \
+            policies=database-policy \
+            ttl=1h
+
+      restartPolicy: OnFailure
