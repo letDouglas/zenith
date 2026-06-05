@@ -5,13 +5,19 @@ metadata:
   namespace: argocd
 spec:
   project: default
-  source:
-    repoURL: https://github.com/letDouglas/zenith.git
-    targetRevision: dev
-    path: platform/argocd-apps 
-    helm:
-      valueFiles:
-        - ../../helm/vault-values.yaml
+  sources:
+    - repoURL: https://helm.releases.hashicorp.com
+      chart: vault
+      targetRevision: 0.28.0
+      helm:
+        releaseName: vault
+        valueFiles:
+          - $values/platform/helm/vault-values.yaml 
+    
+    - repoURL: https://github.com/letDouglas/zenith.git
+      targetRevision: dev
+      ref: values
+
   destination:
     server: https://kubernetes.default.svc
     namespace: vault

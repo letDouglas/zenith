@@ -16,4 +16,4 @@ server:
     size: 2Gi
     storageClass: longhorn
 injector:
-  enabled: true
+  enabled: false
