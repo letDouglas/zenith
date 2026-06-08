@@ -174,19 +174,14 @@ workload-vault-auth-config:
 	KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl get configmap kube-root-ca.crt \
 		-n kube-system -o jsonpath='{.data.ca\.crt}' > /tmp/workload-ca.crt
 	KUBECONFIG=$(KUBECONFIG_MGMT) kubectl cp /tmp/workload-ca.crt vault/vault-0:/tmp/workload-ca.crt
-	# Crea service account e clusterrolebinding per il token reviewer
 	KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl create serviceaccount vault-token-reviewer \
 		-n kube-system --dry-run=client -o yaml | KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl apply -f -
 	KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl create clusterrolebinding vault-token-reviewer \
 		--clusterrole=system:auth-delegator \
 		--serviceaccount=kube-system:vault-token-reviewer \
 		--dry-run=client -o yaml | KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl apply -f -
-	# Crea secret long-lived (tipo kubernetes.io/service-account-token) per il token reviewer
 	KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl apply -f platform/workload/manifests/vault/token-reviewer-secret.yaml
-	# Aspetta che il token venga popolato nel secret
 	sleep 8
-	# Usa una shell unica per leggere il reviewer token e passarlo a Vault nella stessa invocazione
-	# (evita il problema di $(eval ...) in recipe che può restituire stringa vuota)
 	@REVIEWER_TOKEN=$$(KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl get secret vault-token-reviewer \
 		-n kube-system -o jsonpath='{.data.token}' | base64 -d); \
 	KUBECONFIG=$(KUBECONFIG_MGMT) kubectl exec -n vault vault-0 -- \
