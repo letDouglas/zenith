@@ -12,7 +12,7 @@ spec:
     helm:
       releaseName: cnpg
   destination:
-    server: zenith-workload
+    name: zenith-workload
     namespace: cnpg-system
   syncPolicy:
     automated:

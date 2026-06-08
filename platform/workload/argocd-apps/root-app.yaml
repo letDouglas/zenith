@@ -10,7 +10,7 @@ spec:
     targetRevision: dev
     path: platform/workload/argocd-apps
   destination:
-    server: zenith-workload
+    server: https://kubernetes.default.svc 
     namespace: argocd
   syncPolicy:
     automated:
