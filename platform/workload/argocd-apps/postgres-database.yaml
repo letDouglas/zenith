@@ -1,23 +1,20 @@
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: cnpg-operator
+  name: postgres-database
   namespace: argocd
 spec:
   project: default
   source:
-    chart: cloudnative-pg
-    repoURL: https://cloudnative-pg.github.io/charts
-    targetRevision: 0.22.0
-    helm:
-      releaseName: cnpg
+    repoURL: https://github.com/letDouglas/zenith.git
+    targetRevision: dev
+    path: platform/workload/manifests/database
   destination:
     name: zenith-workload
-    namespace: cnpg-system
+    namespace: database
   syncPolicy:
     automated:
       prune: true
       selfHeal: true
     syncOptions:
       - CreateNamespace=true
-      - ServerSideApply=true
