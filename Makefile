@@ -82,7 +82,7 @@ mgmt-done:
 	@echo " 4. Abilita kv-v2 e metti la password del database in Vault:"
 	@echo "    ROOT_TOKEN=<root-token>"
 	@echo "    KUBECONFIG=$(KUBECONFIG_MGMT) kubectl exec -n vault vault-0 -- env VAULT_TOKEN=\$$ROOT_TOKEN vault secrets enable -path=secret kv-v2"
-	@echo "    KUBECONFIG=$(KUBECONFIG_MGMT) kubectl exec -n vault vault-0 -- env VAULT_TOKEN=\$$ROOT_TOKEN vault kv put secret/postgres-credentials password=<password>"
+	@echo "    KUBECONFIG=$(KUBECONFIG_MGMT) kubectl exec -n vault vault-0 -- env VAULT_TOKEN=\$$ROOT_TOKEN vault kv put secret/postgres-credentials username=app_user password=<password>
 	@echo ""
 	@echo " Poi esegui: make bootstrap-workload"
 	@echo ""
@@ -189,6 +189,9 @@ workload-vault-auth-config:
 		vault auth enable -path=kubernetes-workload kubernetes || true; \
 	KUBECONFIG=$(KUBECONFIG_MGMT) kubectl exec -n vault vault-0 -- \
 		env VAULT_TOKEN=$(ROOT_TOKEN) \
+		sh -c 'echo "path \"secret/data/postgres-credentials\" { capabilities = [\"read\"] }" | vault policy write database-policy -'; \
+	KUBECONFIG=$(KUBECONFIG_MGMT) kubectl exec -n vault vault-0 -- \
+		env VAULT_TOKEN=$(ROOT_TOKEN) \
 		vault write auth/kubernetes-workload/config \
 		kubernetes_host=https://$(WORKLOAD_API_IP):6443 \
 		kubernetes_ca_cert=@/tmp/workload-ca.crt \
@@ -201,7 +204,6 @@ workload-vault-auth-config:
 		bound_service_account_namespaces=database \
 		policies=database-policy \
 		ttl=1h
-
 
 workload-argocd-bootstrap:
 	$(eval MGMT_IP := $(shell multipass info $(MGMT_NODE) --format json | jq -r '.info["$(MGMT_NODE)"].ipv4[0]'))
