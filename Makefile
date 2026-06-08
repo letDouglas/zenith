@@ -182,16 +182,7 @@ workload-vault-auth-config:
 		--serviceaccount=kube-system:vault-token-reviewer \
 		--dry-run=client -o yaml | KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl apply -f -
 	# Crea secret long-lived (tipo kubernetes.io/service-account-token) per il token reviewer
-	KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl apply -f - <<EOF
-	apiVersion: v1
-	kind: Secret
-	metadata:
-	  name: vault-token-reviewer
-	  namespace: kube-system
-	  annotations:
-	    kubernetes.io/service-account.name: vault-token-reviewer
-	type: kubernetes.io/service-account-token
-	EOF
+	KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl apply -f platform/workload/manifests/vault/token-reviewer-secret.yaml
 	# Aspetta che il token venga popolato nel secret
 	sleep 8
 	# Usa una shell unica per leggere il reviewer token e passarlo a Vault nella stessa invocazione
@@ -221,7 +212,7 @@ workload-argocd-bootstrap:
 	$(eval MGMT_IP := $(shell multipass info $(MGMT_NODE) --format json | jq -r '.info["$(MGMT_NODE)"].ipv4[0]'))
 	# Sostituisce qualsiasi server URL nel secret-store (IP e porta) con i valori corretti.
 	# Il pattern matcha sia VAULT_SERVER_PLACEHOLDER che qualsiasi IP precedente.
-	sed -i '' 's|server: "http://[^"]*"|server: "http://$(MGMT_IP):30820"|g' \
+	sed -i' ' 's|server: "http://[^"]*"|server: "http://$(MGMT_IP):30820"|g' \
 		platform/workload/manifests/database/secret-store.yaml
 	# Committa e pusha l'IP aggiornato prima che ArgoCD sincronizzi
 	git add platform/workload/manifests/database/secret-store.yaml
