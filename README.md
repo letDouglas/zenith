@@ -42,6 +42,8 @@ Human puts password in Vault (once)
         └── CNPG uses it to initialize app_db with app_user
 ```
 
+**Why two clusters** — Vault lives on the management cluster which is never destroyed. The workload cluster can be destroyed and rebuilt at any time without touching secrets. No race conditions, no bootstrap jobs, no sync waves needed.
+
 ---
 
 ## prerequisites
@@ -63,17 +65,13 @@ brew install derailed/k9s/k9s
 
 ## kubeconfig setup
 
+The Makefile writes cluster configs to `~/.kube/clusters/`. Create the directory and register the paths:
+
 ```bash
 mkdir -p ~/.kube/clusters
 ```
 
-Add to `~/.zshrc`:
-
-```bash
-export KUBECONFIG=~/.kube/config:~/.kube/clusters/zenith-mgmt:~/.kube/clusters/zenith
-```
-
-If you use kube-switch, add to `~/.kube/kube-switch.yaml`:
+Add to `~/.kube/kube-switch.yaml` (used by `switch`):
 
 ```yaml
 - kind: filesystem
@@ -81,6 +79,13 @@ If you use kube-switch, add to `~/.kube/kube-switch.yaml`:
   paths:
     - ~/.kube/clusters/zenith-mgmt
     - ~/.kube/clusters/zenith
+```
+
+Then switch between clusters with:
+
+```bash
+switch zenith-mgmt   # management cluster
+switch zenith        # workload cluster
 ```
 
 ---
@@ -99,6 +104,8 @@ When done, complete these **one-time manual steps**:
 
 **Init and unseal Vault:**
 ```bash
+switch zenith-mgmt
+
 kubectl exec -n vault vault-0 -- vault operator init
 # Save the 5 unseal keys and root token somewhere safe (password manager)
 
@@ -112,7 +119,7 @@ kubectl create secret generic vault-root-token \
   -n vault --from-literal=token=<root-token>
 ```
 
-**Enable kv-v2 and put the database password in Vault:**
+**Enable kv-v2 and put the database credentials in Vault:**
 ```bash
 ROOT_TOKEN=<root-token>
 
@@ -120,13 +127,12 @@ kubectl exec -n vault vault-0 -- \
   env VAULT_TOKEN=$ROOT_TOKEN vault secrets enable -path=secret kv-v2
 
 kubectl exec -n vault vault-0 -- \
-  env VAULT_TOKEN=$ROOT_TOKEN vault policy write database-policy - <<EOF
-path "secret/data/postgres-credentials" { capabilities = ["read"] }
-EOF
-
-kubectl exec -n vault vault-0 -- \
-  env VAULT_TOKEN=$ROOT_TOKEN vault kv put secret/postgres-credentials password=<your-password>
+  env VAULT_TOKEN=$ROOT_TOKEN vault kv put secret/postgres-credentials \
+  username=app_user \
+  password=<your-password>
 ```
+
+> Both `username` and `password` must be stored in Vault. The ExternalSecret maps both fields into the Kubernetes secret consumed by CloudNativePG.
 
 ### step 2 — workload cluster
 
@@ -134,9 +140,19 @@ kubectl exec -n vault vault-0 -- \
 make bootstrap-workload
 ```
 
-This creates 3 workload VMs, installs k3s + Cilium + Longhorn + Traefik, registers the workload cluster in ArgoCD, and applies the root-app.
+This creates 3 workload VMs, installs k3s + Cilium + Longhorn + Traefik, configures Vault Kubernetes auth for the workload cluster, registers it in ArgoCD, and applies the root-app.
 
 ArgoCD then automatically deploys ESO, CNPG, and Postgres. No further manual steps.
+
+**What `bootstrap-workload` does automatically:**
+
+- Creates a `vault-token-reviewer` ServiceAccount + long-lived token secret in the workload cluster
+- Copies the workload cluster CA cert into Vault
+- Enables the `kubernetes-workload` auth mount in Vault and writes the `database-policy`
+- Creates the `database-role` binding the `vault-auth-sa` ServiceAccount to the policy
+- Updates `secret-store.yaml` with the current management VM IP via `sed` and pushes to Git
+- Registers GitHub credentials and the workload cluster into ArgoCD
+- Deploys the root-app (App of Apps pattern)
 
 ---
 
@@ -150,7 +166,7 @@ kubectl get pods -A
 kubectl get pods -n database -w   # wait for all 3 postgres pods Running
 ```
 
-Retrieve the database password:
+Retrieve the synced database credentials:
 
 ```bash
 kubectl get secret postgres-db-secret -n database \
@@ -176,15 +192,82 @@ make destroy            # destroy everything
 
 ---
 
-## notes
+## troubleshooting
 
-**Why two clusters** — Vault lives on the management cluster which is never destroyed. The workload cluster can be destroyed and rebuilt at any time without touching secrets. No race conditions, no bootstrap jobs, no sync waves needed.
+### ExternalSecrets `permission denied` (403)
+
+Vault requires an explicit policy granting read access on the secret path. The policy is written automatically by `make bootstrap-workload`, but if you re-ran Vault init manually, check:
+
+```bash
+switch zenith-mgmt
+
+kubectl exec -n vault vault-0 -- \
+  env VAULT_TOKEN=<root-token> vault policy read database-policy
+```
+
+If missing, re-apply:
+
+```bash
+kubectl exec -n vault vault-0 -- \
+  env VAULT_TOKEN=<root-token> \
+  sh -c 'echo "path \"secret/data/postgres-credentials\" { capabilities = [\"read\"] }" \
+  | vault policy write database-policy -'
+```
+
+### Postgres pod stuck in Init
+
+The CNPG cluster pod stays in `Init` if the `postgres-db-secret` is not yet synced. Check the ExternalSecret status first:
+
+```bash
+kubectl describe externalsecret postgres-password-sync -n database
+```
+
+If the secret exists but Postgres still won't start, the pod may be stuck in exponential backoff. Force a retry by deleting the pod:
+
+```bash
+kubectl delete pod -n database -l cnpg.io/cluster=zenith-postgres
+```
+
+### Vault IP changes after VM recreation
+
+Multipass assigns a new IP each time a VM is created. `make bootstrap-workload` handles this automatically via `sed` — it rewrites the `server` field in `secret-store.yaml` and pushes the change to Git before ArgoCD syncs. If you run Vault-related steps manually, update the file yourself:
+
+```bash
+MGMT_IP=$(multipass info zenith-mgmt-1 --format json | jq -r '.info["zenith-mgmt-1"].ipv4[0]')
+sed -i '' 's|server: "http://[^"]*"|server: "http://'"$MGMT_IP"':30820"|g' \
+  platform/workload/manifests/database/secret-store.yaml
+git add platform/workload/manifests/database/secret-store.yaml
+git commit -m "chore: update vault server IP"
+git push origin dev
+```
+
+### Makefile `missing separator` error
+
+Make requires real TAB characters (not spaces) to indent recipe lines. Copy-pasting from a browser often converts tabs to spaces. Verify with:
+
+```bash
+cat -t Makefile | grep -n "^\^I"   # lines starting with a real tab show ^I
+```
+
+Fix in your editor by enabling "show invisibles" and replacing any leading spaces on recipe lines with tabs.
+
+### CNPG password not reloading after Vault rotation
+
+CNPG only reloads credentials from a Secret if the Secret carries the label `cnpg.io/reload: "true"`. This label is already present in the `ExternalSecret` template in `platform/workload/manifests/database/external-secret.yaml`. If you recreated the ExternalSecret manually and omitted the label, add it back and let ArgoCD reconcile.
+
+---
+
+## design notes
 
 **Why multipass** — Longhorn requires `open-iscsi` on the actual node host. Docker-based tools (k3d, kind, minikube) can't provide this. Multipass creates real Ubuntu VMs where `apt-get install open-iscsi` works.
 
-**Cilium without kube-proxy** — `--disable-kube-proxy` doesn't exist in k3s v1.27. Setting `kubeProxyReplacement: strict` in Cilium's Helm values is enough.
+**Cilium without kube-proxy** — `--disable-kube-proxy` doesn't exist in k3s v1.27. Setting `kubeProxyReplacement: strict` in Cilium's Helm values is sufficient.
 
-**Vault token for ESO** — `make bootstrap-workload` automatically creates a scoped Vault token for ESO and stores it as a Kubernetes secret in the workload cluster. You never touch it manually.
+**Vault Kubernetes auth (cross-cluster)** — Vault on the management cluster validates workload Pod identities by calling the workload API server using a long-lived `vault-token-reviewer` token. This is necessary because Vault cannot use its own cluster's CA to verify tokens from a different cluster (`disable_local_ca_jwt=true`).
+
+**Placeholder IP in Git** — `secret-store.yaml` stores a placeholder URL for the Vault server. The Makefile resolves the real IP at bootstrap time and commits the result before ArgoCD syncs. Never hardcode an IP directly in the repository; Multipass IPs change on every VM recreation.
+
+**ExternalSecret field mapping** — CNPG requires a Secret with both a `username` and a `password` key. The ExternalSecret explicitly maps both properties from the single Vault KV entry at `secret/postgres-credentials`.
 
 ---
 
