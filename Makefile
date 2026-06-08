@@ -68,23 +68,23 @@ mgmt-done:
 	@echo " ✅ Management cluster ready."
 	@echo "════════════════════════════════════════════════════════"
 	@echo ""
-	@echo " Completa questi step prima di eseguire make bootstrap-workload:"
+	@echo " Complete the following steps before running 'make bootstrap-workload':"
 	@echo ""
-	@echo " 1. Init Vault (salva output in un password manager):"
+	@echo " 1. Initialize Vault (save the output to a password manager):"
 	@echo "    KUBECONFIG=$(KUBECONFIG_MGMT) kubectl exec -n vault vault-0 -- vault operator init"
 	@echo ""
-	@echo " 2. Unseal Vault (ripeti 3 volte con 3 chiavi diverse):"
+	@echo " 2. Unseal Vault (repeat 3 times using 3 different unseal keys):"
 	@echo "    KUBECONFIG=$(KUBECONFIG_MGMT) kubectl exec -n vault vault-0 -- vault operator unseal"
 	@echo ""
-	@echo " 3. Crea il secret con il root token:"
+	@echo " 3. Create the secret containing the root token:"
 	@echo "    KUBECONFIG=$(KUBECONFIG_MGMT) kubectl create secret generic vault-root-token -n vault --from-literal=token=<root-token>"
 	@echo ""
-	@echo " 4. Abilita kv-v2 e metti la password del database in Vault:"
+	@echo " 4. Enable kv-v2 engine and store the database password in Vault:"
 	@echo "    ROOT_TOKEN=<root-token>"
 	@echo "    KUBECONFIG=$(KUBECONFIG_MGMT) kubectl exec -n vault vault-0 -- env VAULT_TOKEN=\$$ROOT_TOKEN vault secrets enable -path=secret kv-v2"
-	@echo "    KUBECONFIG=$(KUBECONFIG_MGMT) kubectl exec -n vault vault-0 -- env VAULT_TOKEN=\$$ROOT_TOKEN vault kv put secret/postgres-credentials username=app_user password=<password>
+	@echo "    KUBECONFIG=$(KUBECONFIG_MGMT) kubectl exec -n vault vault-0 -- env VAULT_TOKEN=\$$ROOT_TOKEN vault kv put secret/postgres-credentials username=app_user password=<password>"
 	@echo ""
-	@echo " Poi esegui: make bootstrap-workload"
+	@echo " Then execute: make bootstrap-workload"
 	@echo ""
 
 destroy-mgmt:
@@ -207,15 +207,15 @@ workload-vault-auth-config:
 
 workload-argocd-bootstrap:
 	$(eval MGMT_IP := $(shell multipass info $(MGMT_NODE) --format json | jq -r '.info["$(MGMT_NODE)"].ipv4[0]'))
-	# Sostituisce qualsiasi server URL nel secret-store (IP e porta) con i valori corretti.
-	# Il pattern matcha sia VAULT_SERVER_PLACEHOLDER che qualsiasi IP precedente.
+	# Dynamically updates the server URL in the secret-store manifest with the retrieved management IP and port.
+	# The pattern covers both the initial placeholder and any previously updated IP addresses.
 	sed -i' ' 's|server: "http://[^"]*"|server: "http://$(MGMT_IP):30820"|g' \
 		platform/workload/manifests/database/secret-store.yaml
-	# Committa e pusha l'IP aggiornato prima che ArgoCD sincronizzi
+	# Commit and push the updated IP address before ArgoCD synchronization triggers
 	git add platform/workload/manifests/database/secret-store.yaml
 	git commit -m "chore: update vault server IP for bootstrap [skip ci]" || true
 	git push origin dev || true
-	# Registra le credenziali GitHub in ArgoCD per accedere al repo
+	# Register GitHub credentials within ArgoCD to grant repository access
 	KUBECONFIG=$(KUBECONFIG_MGMT) kubectl create secret generic github-creds \
 		--namespace argocd \
 		--from-literal=username=$(GITHUB_USER) \
@@ -224,27 +224,27 @@ workload-argocd-bootstrap:
 		--dry-run=client -o yaml | KUBECONFIG=$(KUBECONFIG_MGMT) kubectl apply -f -
 	KUBECONFIG=$(KUBECONFIG_MGMT) kubectl label secret github-creds -n argocd \
 		argocd.argoproj.io/secret-type=repository --overwrite
-	# Esporta il kubeconfig del workload cluster per registrarlo in ArgoCD
+	# Export the workload cluster kubeconfig context for ArgoCD registration
 	KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl config view --raw > /tmp/workload-kubeconfig.yaml
-	# Login ArgoCD via port-forward
+	# Authenticate to ArgoCD via port-forwarding
 	KUBECONFIG=$(KUBECONFIG_MGMT) argocd login \
 		--port-forward --port-forward-namespace argocd --plaintext --insecure \
 		--username admin \
 		--password $$(KUBECONFIG=$(KUBECONFIG_MGMT) kubectl get secret argocd-initial-admin-secret \
 			-n argocd -o jsonpath='{.data.password}' | base64 -d)
-	# Registra il workload cluster in ArgoCD con il nome zenith-workload
+	# Register the workload cluster into ArgoCD under the name 'zenith-workload'
 	KUBECONFIG=$(KUBECONFIG_MGMT) argocd cluster add zenith \
 		--kubeconfig /tmp/workload-kubeconfig.yaml \
 		--name zenith-workload \
 		--port-forward \
 		--port-forward-namespace argocd \
 		--yes
-	# Applica la root-app: da qui ArgoCD gestisce tutto il resto in autonomia
+	# Deploy the root application; ArgoCD will manage subsequent sync states autonomously from this point
 	KUBECONFIG=$(KUBECONFIG_MGMT) kubectl apply -f platform/workload/argocd-apps/root-app.yaml -n argocd
 	@echo ""
 	@echo "════════════════════════════════════════════════════════"
-	@echo " ✅ Bootstrap completo. ArgoCD sta deployando il workload cluster."
-	@echo " Monitora con: KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl get pods -A -w"
+	@echo " ✅ Bootstrap completed. ArgoCD is deploying the workload cluster."
+	@echo " Monitor execution with: KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl get pods -A -w"
 	@echo "════════════════════════════════════════════════════════"
 	@echo ""
 
