@@ -167,35 +167,43 @@ workload-traefik-install:
 		--wait --timeout=120s
 
 # ── vault kubernetes auth for the workload cluster ──────────────────────────
-# Vault runs on the management cluster and must be able to validate
-# JWTs issued by ServiceAccounts in the workload cluster.
-# To do this, it requires:
-#   - the workload cluster API server IP
-#   - the workload cluster CA certificate
-# This is configured here in the Makefile because this is the only place
-# where we have access to both clusters at the same time.
 workload-vault-auth-config:
 	$(eval WORKLOAD_API_IP := $(shell multipass info zenith-1 --format json | jq -r '.info["zenith-1"].ipv4[0]'))
 	$(eval ROOT_TOKEN := $(shell KUBECONFIG=$(KUBECONFIG_MGMT) kubectl get secret vault-root-token \
 		-n vault -o jsonpath='{.data.token}' | base64 -d))
-	# Estrai il CA cert del workload cluster e copialo nel pod Vault
 	KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl get configmap kube-root-ca.crt \
 		-n kube-system -o jsonpath='{.data.ca\.crt}' > /tmp/workload-ca.crt
 	KUBECONFIG=$(KUBECONFIG_MGMT) kubectl cp /tmp/workload-ca.crt vault/vault-0:/tmp/workload-ca.crt
-	# Abilita un mount kubernetes auth dedicato al workload cluster
+	# Crea token reviewer sul workload cluster
+	KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl create serviceaccount vault-token-reviewer \
+		-n kube-system --dry-run=client -o yaml | KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl apply -f -
+	KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl create clusterrolebinding vault-token-reviewer \
+		--clusterrole=system:auth-delegator \
+		--serviceaccount=kube-system:vault-token-reviewer \
+		--dry-run=client -o yaml | KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl apply -f -
+	KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl apply -f - <<EOF
+	apiVersion: v1
+	kind: Secret
+	metadata:
+	  name: vault-token-reviewer
+	  namespace: kube-system
+	  annotations:
+	    kubernetes.io/service-account.name: vault-token-reviewer
+	type: kubernetes.io/service-account-token
+	EOF
+	sleep 5
+	$(eval REVIEWER_TOKEN := $(shell KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl get secret vault-token-reviewer \
+		-n kube-system -o jsonpath='{.data.token}' | base64 -d))
 	KUBECONFIG=$(KUBECONFIG_MGMT) kubectl exec -n vault vault-0 -- \
 		env VAULT_TOKEN=$(ROOT_TOKEN) \
 		vault auth enable -path=kubernetes-workload kubernetes || true
-	# Configura il mount con l'endpoint e il CA del workload cluster
-	# disable_local_ca_jwt=true è necessario perché Vault gira su un cluster diverso
 	KUBECONFIG=$(KUBECONFIG_MGMT) kubectl exec -n vault vault-0 -- \
 		env VAULT_TOKEN=$(ROOT_TOKEN) \
 		vault write auth/kubernetes-workload/config \
 		kubernetes_host=https://$(WORKLOAD_API_IP):6443 \
 		kubernetes_ca_cert=@/tmp/workload-ca.crt \
+		token_reviewer_jwt="$(REVIEWER_TOKEN)" \
 		disable_local_ca_jwt=true
-	# Crea il role che lega il ServiceAccount vault-auth-sa nel namespace database
-	# alla policy database-policy
 	KUBECONFIG=$(KUBECONFIG_MGMT) kubectl exec -n vault vault-0 -- \
 		env VAULT_TOKEN=$(ROOT_TOKEN) \
 		vault write auth/kubernetes-workload/role/database-role \
@@ -204,10 +212,12 @@ workload-vault-auth-config:
 		policies=database-policy \
 		ttl=1h
 
+
 workload-argocd-bootstrap:
 	$(eval MGMT_IP := $(shell multipass info $(MGMT_NODE) --format json | jq -r '.info["$(MGMT_NODE)"].ipv4[0]'))
 	# Inietta l'IP di Vault nel secret-store manifest prima di committarlo/applicarlo
-	sed -i '' 's|VAULT_ADDR|$(MGMT_IP)|g' platform/workload/manifests/database/secret-store.yaml
+	sed -i '' 's|http://.*:8200|http://$(MGMT_IP):30820|g' \
+		platform/workload/manifests/database/secret-store.yaml
 	# Registra le credenziali GitHub in ArgoCD per accedere al repo
 	KUBECONFIG=$(KUBECONFIG_MGMT) kubectl create secret generic github-creds \
 		--namespace argocd \

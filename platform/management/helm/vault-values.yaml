@@ -15,6 +15,7 @@ server:
     enabled: true
     size: 2Gi
   service:
-    type: ClusterIP
+    type: NodePort
+    nodePort: 30820
 injector:
   enabled: false
