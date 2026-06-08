@@ -174,13 +174,14 @@ workload-vault-auth-config:
 	KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl get configmap kube-root-ca.crt \
 		-n kube-system -o jsonpath='{.data.ca\.crt}' > /tmp/workload-ca.crt
 	KUBECONFIG=$(KUBECONFIG_MGMT) kubectl cp /tmp/workload-ca.crt vault/vault-0:/tmp/workload-ca.crt
-	# Crea token reviewer sul workload cluster
+	# Crea service account e clusterrolebinding per il token reviewer
 	KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl create serviceaccount vault-token-reviewer \
 		-n kube-system --dry-run=client -o yaml | KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl apply -f -
 	KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl create clusterrolebinding vault-token-reviewer \
 		--clusterrole=system:auth-delegator \
 		--serviceaccount=kube-system:vault-token-reviewer \
 		--dry-run=client -o yaml | KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl apply -f -
+	# Crea secret long-lived (tipo kubernetes.io/service-account-token) per il token reviewer
 	KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl apply -f - <<EOF
 	apiVersion: v1
 	kind: Secret
@@ -191,19 +192,22 @@ workload-vault-auth-config:
 	    kubernetes.io/service-account.name: vault-token-reviewer
 	type: kubernetes.io/service-account-token
 	EOF
-	sleep 5
-	$(eval REVIEWER_TOKEN := $(shell KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl get secret vault-token-reviewer \
-		-n kube-system -o jsonpath='{.data.token}' | base64 -d))
+	# Aspetta che il token venga popolato nel secret
+	sleep 8
+	# Usa una shell unica per leggere il reviewer token e passarlo a Vault nella stessa invocazione
+	# (evita il problema di $(eval ...) in recipe che può restituire stringa vuota)
+	@REVIEWER_TOKEN=$$(KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl get secret vault-token-reviewer \
+		-n kube-system -o jsonpath='{.data.token}' | base64 -d); \
 	KUBECONFIG=$(KUBECONFIG_MGMT) kubectl exec -n vault vault-0 -- \
 		env VAULT_TOKEN=$(ROOT_TOKEN) \
-		vault auth enable -path=kubernetes-workload kubernetes || true
+		vault auth enable -path=kubernetes-workload kubernetes || true; \
 	KUBECONFIG=$(KUBECONFIG_MGMT) kubectl exec -n vault vault-0 -- \
 		env VAULT_TOKEN=$(ROOT_TOKEN) \
 		vault write auth/kubernetes-workload/config \
 		kubernetes_host=https://$(WORKLOAD_API_IP):6443 \
 		kubernetes_ca_cert=@/tmp/workload-ca.crt \
-		token_reviewer_jwt="$(REVIEWER_TOKEN)" \
-		disable_local_ca_jwt=true
+		token_reviewer_jwt="$$REVIEWER_TOKEN" \
+		disable_local_ca_jwt=true; \
 	KUBECONFIG=$(KUBECONFIG_MGMT) kubectl exec -n vault vault-0 -- \
 		env VAULT_TOKEN=$(ROOT_TOKEN) \
 		vault write auth/kubernetes-workload/role/database-role \
@@ -215,9 +219,14 @@ workload-vault-auth-config:
 
 workload-argocd-bootstrap:
 	$(eval MGMT_IP := $(shell multipass info $(MGMT_NODE) --format json | jq -r '.info["$(MGMT_NODE)"].ipv4[0]'))
-	# Inietta l'IP di Vault nel secret-store manifest prima di committarlo/applicarlo
-	sed -i '' 's|http://.*:8200|http://$(MGMT_IP):30820|g' \
+	# Sostituisce qualsiasi server URL nel secret-store (IP e porta) con i valori corretti.
+	# Il pattern matcha sia VAULT_SERVER_PLACEHOLDER che qualsiasi IP precedente.
+	sed -i '' 's|server: "http://[^"]*"|server: "http://$(MGMT_IP):30820"|g' \
 		platform/workload/manifests/database/secret-store.yaml
+	# Committa e pusha l'IP aggiornato prima che ArgoCD sincronizzi
+	git add platform/workload/manifests/database/secret-store.yaml
+	git commit -m "chore: update vault server IP for bootstrap [skip ci]" || true
+	git push origin dev || true
 	# Registra le credenziali GitHub in ArgoCD per accedere al repo
 	KUBECONFIG=$(KUBECONFIG_MGMT) kubectl create secret generic github-creds \
 		--namespace argocd \
