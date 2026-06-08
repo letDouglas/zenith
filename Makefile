@@ -8,6 +8,7 @@ LONGHORN_VERSION = 1.5.1
 TRAEFIK_VERSION  = 26.0.0
 KUBECONFIG_ZENITH = $(HOME)/.kube/clusters/zenith
 ARGOCD_VERSION   = 5.46.7
+ARGOCD_CLI_VERSION = 2.9.3
 
 GITHUB_TOKEN ?= $(error Imposta GITHUB_TOKEN in .env)
 GITHUB_USER  ?= $(error Imposta GITHUB_USER in .env)
@@ -103,6 +104,7 @@ argocd-install:
 	  --create-namespace \
 	  --values platform/helm/argocd-values.yaml \
 	  --wait --timeout=120s
+	brew install argocd 2>/dev/null || true
 
 argocd-bootstrap:
 	KUBECONFIG=$(KUBECONFIG_ZENITH) kubectl create namespace cnpg-system --dry-run=client -o yaml | KUBECONFIG=$(KUBECONFIG_ZENITH) kubectl apply -f -
@@ -116,23 +118,41 @@ argocd-bootstrap:
 		argocd.argoproj.io/secret-type=repository --overwrite
 	KUBECONFIG=$(KUBECONFIG_ZENITH) kubectl apply -f platform/argocd-apps/root-app.yaml -n argocd
 	@echo ""
-	@echo "✅ Bootstrap completed. ArgoCD is deploying wave 1 (Vault + ESO)."
+	@echo "════════════════════════════════════════════════════════"
+	@echo " MANUAL STEP 1/2 — Vault init"
+	@echo "════════════════════════════════════════════════════════"
 	@echo ""
-	@echo "⚠️  MANUAL STEPS REQUIRED:"
+	@echo " Wait for Vault to be Running:"
+	@echo "   kubectl get pod -n vault -w"
 	@echo ""
-	@echo "  1. Wait for Vault to be Running:"
-	@echo "     kubectl get pod -n vault -w"
+	@echo " Initialize Vault (run once, save the output somewhere safe):"
+	@echo "   kubectl exec -n vault vault-0 -- vault operator init"
 	@echo ""
-	@echo "  2. Initialize and unseal Vault:"
-	@echo "     kubectl exec -n vault vault-0 -- vault operator init"
-	@echo "     kubectl exec -n vault vault-0 -- vault operator unseal  # x3"
+	@echo " Unseal Vault (repeat 3x with 3 different unseal keys):"
+	@echo "   kubectl exec -n vault vault-0 -- vault operator unseal"
 	@echo ""
-	@echo "  3. Create the secret containing the root token:"
-	@echo "     kubectl create secret generic vault-root-token --namespace vault --from-literal=token=<root-token>"
+	@echo " Create the root token secret:"
+	@echo "   kubectl create secret generic vault-root-token --namespace vault --from-literal=token=<root-token>"
 	@echo ""
-	@echo "  4. Store the database password in Vault:"
-	@echo "     ROOT_TOKEN=\$$(kubectl get secret vault-root-token -n vault -o jsonpath='{.data.token}' | base64 -d)"
-	@echo "     kubectl exec -n vault vault-0 -- env VAULT_TOKEN=\$$ROOT_TOKEN vault kv put secret/postgres-credentials password=<password>"
+	@echo " Press ENTER when done."
+	@read _
+	KUBECONFIG=$(KUBECONFIG_ZENITH) ARGOCD_OPTS="--port-forward --port-forward-namespace argocd --plaintext" argocd app sync vault-config --timeout 120
 	@echo ""
-	@echo "  Done. ArgoCD will automatically complete the deployment."
+	@echo "════════════════════════════════════════════════════════"
+	@echo " MANUAL STEP 2/2 — Database password"
+	@echo "════════════════════════════════════════════════════════"
+	@echo ""
+	@echo " Get the root token:"
+	@echo "   ROOT_TOKEN=\$$(kubectl get secret vault-root-token -n vault -o jsonpath='{.data.token}' | base64 -d)"
+	@echo ""
+	@echo " Put the database password in Vault:"
+	@echo "   kubectl exec -n vault vault-0 -- env VAULT_TOKEN=\$$ROOT_TOKEN vault kv put secret/postgres-credentials password=<your-password>"
+	@echo ""
+	@echo " Press ENTER when done."
+	@read _
+	KUBECONFIG=$(KUBECONFIG_ZENITH) ARGOCD_OPTS="--port-forward --port-forward-namespace argocd --plaintext" argocd app sync postgres-database --timeout 120
+	@echo ""
+	@echo "════════════════════════════════════════════════════════"
+	@echo " ✅ Bootstrap complete. All done."
+	@echo "════════════════════════════════════════════════════════"
 	@echo ""
