@@ -3,9 +3,6 @@ kind: Job
 metadata:
   name: vault-bootstrap
   namespace: vault
-  annotations:
-    argocd.argoproj.io/hook: Sync
-    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
 spec:
   template:
     spec:
@@ -24,16 +21,8 @@ spec:
         - /bin/sh
         - -c
         - |
-          echo "Enabling Kubernetes Auth..."
-          vault auth enable kubernetes || true
-          
           echo "Enabling KV-V2 Secrets Engine..."
           vault secrets enable -path=secret kv-v2 || true
-
-          echo "Configuring Kubernetes Auth..."
-          vault write auth/kubernetes/config \
-            kubernetes_host=https://kubernetes.default.svc:443 \
-            kubernetes_ca_cert=@/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
 
           echo "Creating Database Policy..."
           vault policy write database-policy - <<EOF
@@ -41,12 +30,4 @@ spec:
             capabilities = ["read"]
           }
           EOF
-
-          echo "Creating ESO Role..."
-          vault write auth/kubernetes/role/database-role \
-            bound_service_account_names=vault-auth-sa \
-            bound_service_account_namespaces=database \
-            policies=database-policy \
-            ttl=1h
-
       restartPolicy: OnFailure

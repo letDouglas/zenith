@@ -2,20 +2,45 @@
 
 A professional bare-metal Kubernetes homelab environment, designed to mirror enterprise GitOps patterns.
 
+Two-cluster architecture: a **management cluster** running ArgoCD and Vault, and a **workload cluster** running the actual applications.
+
 ---
 
 ## stack
 
-| component | version | role |
+| component | version | cluster |
 |---|---|---|
-| k3s | v1.27.4 | Kubernetes distribution |
-| Cilium | 1.14.3 | CNI + kube-proxy replacement + L2 LB |
-| Longhorn | 1.5.1 | Distributed block storage |
-| Traefik | 26.0.0 | Ingress controller |
-| ArgoCD | 5.46.7 | GitOps engine |
-| Vault | 0.28.0 (chart) | Secrets management |
-| External Secrets Operator | 0.9.11 | Vault → Kubernetes secret sync |
-| CloudNativePG | 0.22.0 (chart) | PostgreSQL operator |
+| k3s | v1.27.4 | both |
+| Cilium | 1.14.3 | workload |
+| Longhorn | 1.5.1 | workload |
+| Traefik | 26.0.0 | workload |
+| ArgoCD | 5.46.7 | management |
+| Vault | 0.28.0 (chart) | management |
+| External Secrets Operator | 0.9.11 | workload |
+| CloudNativePG | 0.22.0 (chart) | workload |
+
+---
+
+## architecture
+
+```
+┌─────────────────────────────┐     ┌─────────────────────────────────────┐
+│   management cluster        │     │   workload cluster                  │
+│   zenith-mgmt-1 (4GB)       │     │   zenith-1/2/3 (3GB each)           │
+│                             │     │                                     │
+│   ArgoCD ──────────────────────────► deploys everything below           │
+│   Vault  ◄──────────────────────────  ESO reads secrets                 │
+│                             │     │   CNPG + Postgres                   │
+│                             │     │   Longhorn + Cilium + Traefik       │
+└─────────────────────────────┘     └─────────────────────────────────────┘
+```
+
+Secrets flow:
+```
+Human puts password in Vault (once)
+  └── ESO syncs it as postgres-db-secret in namespace database
+        └── CNPG uses it to initialize app_db with app_user
+```
 
 ---
 
@@ -23,66 +48,29 @@ A professional bare-metal Kubernetes homelab environment, designed to mirror ent
 
 ```bash
 brew install --cask multipass
-brew install kubernetes-cli helm jq
+brew install kubernetes-cli helm jq argocd
 ```
 
 Optional but recommended:
 
 ```bash
-brew install danielfoehrkn/switch/switch   # kubeconfig context switcher
+brew install danielfoehrkn/switch/switch
 brew install kubecolor
 brew install derailed/k9s/k9s
-```
-
-### why multipass
-
-Longhorn requires `open-iscsi` on the actual node host — not inside a container. This rules out every tool that uses Docker containers as nodes:
-
-| tool | problem |
-|---|---|
-| k3d | Alpine nodes — no working package manager for iscsi |
-| kind | same as k3d |
-| minikube (qemu2) | Buildroot ISO — no `apt-get`, open-iscsi not installable |
-
-Multipass creates real Ubuntu VMs → `apt-get install open-iscsi` works → Longhorn runs.
-
----
-
-## architecture
-
-```
-GitHub (dev branch)
-    └── ArgoCD (root-app, App of Apps pattern)
-            ├── wave 1 — Vault + External Secrets Operator
-            ├── wave 2 — vault-config (bootstrap job: auth, policy, kv-v2)
-            └── wave 3 — CNPG operator + postgres-database
-                              └── ExternalSecret reads from Vault
-                              └── postgres-db-secret created in k8s
-                              └── CNPG cluster bootstraps with that secret
-```
-
-Secrets flow:
-
-```
-Human puts password in Vault (one-time, manual)
-    └── ESO syncs it as postgres-db-secret in namespace database
-            └── CNPG uses it to initialize app_db with app_user
 ```
 
 ---
 
 ## kubeconfig setup
 
-Bootstrap writes kubeconfig to `~/.kube/clusters/zenith`. Create the dir first:
-
 ```bash
 mkdir -p ~/.kube/clusters
 ```
 
-Add to your shell (`~/.zshrc`):
+Add to `~/.zshrc`:
 
 ```bash
-export KUBECONFIG=~/.kube/config:~/.kube/clusters/zenith
+export KUBECONFIG=~/.kube/config:~/.kube/clusters/zenith-mgmt:~/.kube/clusters/zenith
 ```
 
 If you use kube-switch, add to `~/.kube/kube-switch.yaml`:
@@ -91,6 +79,7 @@ If you use kube-switch, add to `~/.kube/kube-switch.yaml`:
 - kind: filesystem
   id: local
   paths:
+    - ~/.kube/clusters/zenith-mgmt
     - ~/.kube/clusters/zenith
 ```
 
@@ -98,103 +87,104 @@ If you use kube-switch, add to `~/.kube/kube-switch.yaml`:
 
 ## usage
 
+### step 1 — management cluster
+
 ```bash
-make bootstrap   # create VMs, install k3s + Cilium + Longhorn + ArgoCD
-make destroy     # delete everything
+make bootstrap-mgmt
 ```
 
-After bootstrap:
+This creates the management VM, installs k3s, Vault, and ArgoCD.
+
+When done, complete these **one-time manual steps**:
+
+**Init and unseal Vault:**
+```bash
+kubectl exec -n vault vault-0 -- vault operator init
+# Save the 5 unseal keys and root token somewhere safe (password manager)
+
+kubectl exec -n vault vault-0 -- vault operator unseal
+# Repeat 3x with 3 different keys
+```
+
+**Create the root token secret:**
+```bash
+kubectl create secret generic vault-root-token \
+  -n vault --from-literal=token=<root-token>
+```
+
+**Enable kv-v2 and put the database password in Vault:**
+```bash
+ROOT_TOKEN=<root-token>
+
+kubectl exec -n vault vault-0 -- \
+  env VAULT_TOKEN=$ROOT_TOKEN vault secrets enable -path=secret kv-v2
+
+kubectl exec -n vault vault-0 -- \
+  env VAULT_TOKEN=$ROOT_TOKEN vault policy write database-policy - <<EOF
+path "secret/data/postgres-credentials" { capabilities = ["read"] }
+EOF
+
+kubectl exec -n vault vault-0 -- \
+  env VAULT_TOKEN=$ROOT_TOKEN vault kv put secret/postgres-credentials password=<your-password>
+```
+
+### step 2 — workload cluster
+
+```bash
+make bootstrap-workload
+```
+
+This creates 3 workload VMs, installs k3s + Cilium + Longhorn + Traefik, registers the workload cluster in ArgoCD, and applies the root-app.
+
+ArgoCD then automatically deploys ESO, CNPG, and Postgres. No further manual steps.
+
+---
+
+## verify
+
+Check everything is running:
 
 ```bash
 switch zenith
+kubectl get pods -A
+kubectl get pods -n database -w   # wait for all 3 postgres pods Running
 ```
 
----
-
-## bootstrap sequence
-
-`make bootstrap` automates the infrastructure layer:
-
-1. `vms-create` — 3 Ubuntu VMs via multipass (2 CPU, 4G RAM, 20G disk each)
-2. `k3s-install` — k3s on all nodes; server on `zenith-1`, agents on `zenith-2/3`; flannel, traefik, servicelb disabled
-3. `longhorn-prereq` — install `open-iscsi` + `nfs-common` on each node
-4. `cilium-install` — Cilium with `kubeProxyReplacement: strict`
-5. `cilium-config` — L2 IP pool + announcement policy
-6. `cluster-wait` — wait for all nodes Ready
-7. `longhorn-install` — distributed storage
-8. `traefik-install` — ingress controller (LoadBalancer IP: `192.168.64.241`)
-9. `argocd-install` — GitOps engine
-10. `argocd-bootstrap` — GitHub credentials + root-app applied
-
-ArgoCD then takes over and deploys everything else via sync waves.
-
----
-
-## manual steps after bootstrap
-
-After `make bootstrap`, ArgoCD deploys wave 1 (Vault + ESO) and wave 2 (vault-config job). Before wave 3 (postgres) can proceed, **two manual steps are required** — this is intentional and mirrors real production workflows.
-
-### 1. initialize and unseal Vault
-
-Vault starts sealed. Initialize it and unseal it:
-
-```bash
-kubectl exec -n vault vault-0 -- vault operator init
-```
-
-Save the unseal keys and root token somewhere safe (password manager). Then unseal:
-
-```bash
-kubectl exec -n vault vault-0 -- vault operator unseal  # repeat 3 times with different keys
-```
-
-### 2. create the vault-root-token secret
-
-The vault-config bootstrap job needs the root token to configure Vault:
-
-```bash
-kubectl create secret generic vault-root-token \
-  --namespace vault \
-  --from-literal=token=<your-root-token>
-```
-
-The bootstrap job will now run and configure:
-- Kubernetes auth method
-- KV-V2 secrets engine at `secret/`
-- Policy and role for ESO
-
-### 3. put the database password in Vault
-
-This is the only secret you will ever manage manually:
-
-```bash
-ROOT_TOKEN=$(kubectl get secret vault-root-token -n vault -o jsonpath='{.data.token}' | base64 -d)
-
-kubectl exec -n vault vault-0 -- \
-  env VAULT_TOKEN=$ROOT_TOKEN \
-  vault kv put secret/postgres-credentials password=<your-password>
-```
-
-Once this is done, ESO syncs the secret into Kubernetes and CNPG bootstraps the database automatically.
-
-### retrieve the database password later
+Retrieve the database password:
 
 ```bash
 kubectl get secret postgres-db-secret -n database \
   -o jsonpath='{.data.password}' | base64 -d
 ```
 
+Connect to the database:
+
+```bash
+kubectl exec -it zenith-postgres-1 -n database -- \
+  psql -U app_user -d app_db -h localhost
+```
+
+---
+
+## teardown
+
+```bash
+make destroy-workload   # destroy workload cluster only
+make destroy-mgmt       # destroy management cluster only
+make destroy            # destroy everything
+```
+
 ---
 
 ## notes
 
-**Cilium without kube-proxy** — `--disable-kube-proxy` doesn't exist in k3s v1.27 (added in v1.28+). Setting `kubeProxyReplacement: strict` in Cilium's Helm values is enough — Cilium takes over service routing without needing to explicitly disable kube-proxy at the k3s level.
+**Why two clusters** — Vault lives on the management cluster which is never destroyed. The workload cluster can be destroyed and rebuilt at any time without touching secrets. No race conditions, no bootstrap jobs, no sync waves needed.
 
-**Vault in-cluster** — Vault runs inside the cluster in the `vault` namespace. While in production Vault typically lives on dedicated infrastructure outside the cluster, the behavior from the perspective of ESO and CNPG is identical — ESO makes HTTP calls to `http://vault.vault.svc.cluster.local:8200` regardless of where Vault physically runs. This setup faithfully mirrors the enterprise pattern.
+**Why multipass** — Longhorn requires `open-iscsi` on the actual node host. Docker-based tools (k3d, kind, minikube) can't provide this. Multipass creates real Ubuntu VMs where `apt-get install open-iscsi` works.
 
-**Sync waves** — ArgoCD deploys apps in wave order and waits for each wave to be healthy before proceeding. This guarantees that Vault is ready before the bootstrap job runs, and the bootstrap job completes before CNPG attempts to read the database secret.
+**Cilium without kube-proxy** — `--disable-kube-proxy` doesn't exist in k3s v1.27. Setting `kubeProxyReplacement: strict` in Cilium's Helm values is enough.
 
-**vault-root-token** — The bootstrap job uses `BeforeHookCreation` delete policy, meaning it re-runs on every ArgoCD sync. It is idempotent (`|| true` on already-enabled engines). The `vault-root-token` secret must exist in the `vault` namespace for the job to succeed.
+**Vault token for ESO** — `make bootstrap-workload` automatically creates a scoped Vault token for ESO and stores it as a Kubernetes secret in the workload cluster. You never touch it manually.
 
 ---
 
@@ -204,9 +194,10 @@ kubectl get secret postgres-db-secret -n database \
 - [x] Longhorn storage
 - [x] Traefik ingress
 - [x] ArgoCD GitOps
-- [x] Vault secrets management
+- [x] Vault secrets management (management cluster)
 - [x] External Secrets Operator
 - [x] CloudNativePG
-- [ ] Ingress routes (ArgoCD, Longhorn UI, Vault UI)
-- [ ] Monitoring (Prometheus + Grafana)
-- [ ] Backup (Longhorn snapshots + CNPG backups to S3)
+- [ ] Gitea (Git server using the Postgres cluster)
+- [ ] Ingress routes (ArgoCD UI, Longhorn UI, Vault UI)
+- [ ] Monitoring (?)
+- [ ] Backup (CNPG backups to S3/MinIO)
