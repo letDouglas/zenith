@@ -209,8 +209,8 @@ workload-argocd-bootstrap:
 	$(eval MGMT_IP := $(shell multipass info $(MGMT_NODE) --format json | jq -r '.info["$(MGMT_NODE)"].ipv4[0]'))
 	# Dynamically updates the server URL in the secret-store manifest with the retrieved management IP and port.
 	# The pattern covers both the initial placeholder and any previously updated IP addresses.
-	sed -i' ' 's|server: "http://[^"]*"|server: "http://$(MGMT_IP):30820"|g' \
-		platform/workload/manifests/database/secret-store.yaml
+	sed -i.bak 's|server: "http://[^"]*"|server: "http://$(MGMT_IP):30820"|g' platform/workload/manifests/database/secret-store.yaml
+	rm -f platform/workload/manifests/database/secret-store.yaml.bak
 	# Commit and push the updated IP address before ArgoCD synchronization triggers
 	git add platform/workload/manifests/database/secret-store.yaml
 	git commit -m "chore: update vault server IP for bootstrap [skip ci]" || true
