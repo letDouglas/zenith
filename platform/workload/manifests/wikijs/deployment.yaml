@@ -44,10 +44,10 @@ spec:
           resources:
             requests:
               cpu: "50m"
-              memory: "64Mi"
+              memory: "128Mi"
             limits:
-              cpu: "512Mi"
-              memory: "500m"
+              cpu: "500m"
+              memory: "512Mi"
           env:
             - name: DB_TYPE
               value: "postgres"
