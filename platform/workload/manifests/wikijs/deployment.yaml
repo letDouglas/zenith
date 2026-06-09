@@ -1,0 +1,76 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wikijs
+  namespace: database
+  labels:
+    app: wikijs
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: wikijs
+  template:
+    metadata:
+      labels:
+        app: wikijs
+    spec:
+      initContainers:
+        - name: init-db
+          image: postgres:15-alpine
+          env:
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: wikijs-db-secret
+                  key: password
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Waiting for Postgres role 'wikijs'..."
+              until PGPASSWORD="$DB_PASSWORD" psql -h zenith-postgres-rw -U wikijs -d postgres -c "SELECT 1" >/dev/null 2>&1; do
+                sleep 5
+              done
+              if PGPASSWORD="$DB_PASSWORD" psql -h zenith-postgres-rw -U wikijs -d postgres -c "SELECT 1 FROM pg_database WHERE datname = 'wiki'" | grep -q 1; then
+                echo "Database 'wiki' already exists."
+              else
+                echo "Creating database 'wiki'..."
+                PGPASSWORD="$DB_PASSWORD" psql -h zenith-postgres-rw -U wikijs -d postgres -c "CREATE DATABASE wiki OWNER wikijs;"
+              fi
+      containers:
+        - name: wikijs
+          image: ghcr.io/requarks/wiki:2
+          resources:
+            requests:
+              cpu: "128Mi"
+              memory: "100m"
+            limits:
+              cpu: "512Mi"
+              memory: "500m"
+          env:
+            - name: DB_TYPE
+              value: "postgres"
+            - name: DB_HOST
+              value: "zenith-postgres-rw.database.svc.cluster.local"
+            - name: DB_PORT
+              value: "5432"
+            - name: DB_USER
+              value: "wikijs"
+            - name: DB_NAME
+              value: "wiki"
+            - name: DB_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: wikijs-db-secret
+                  key: password
+          ports:
+            - name: http
+              containerPort: 3000
+          volumeMounts:
+            - name: data
+              mountPath: /wiki/data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: wikijs-data-pvc

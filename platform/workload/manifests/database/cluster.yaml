@@ -14,3 +14,12 @@ spec:
       owner: app_user
       secret:
         name: postgres-db-secret
+
+  managed:
+    roles:
+      - name: wikijs
+        ensure: present
+        login: true
+        createdb: true
+        passwordSecret:
+          name: wikijs-db-secret

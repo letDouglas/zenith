@@ -1,0 +1,18 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: wikijs
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/letDouglas/zenith.git
+    targetRevision: dev
+    path: platform/workload/manifests/wikijs
+  destination:
+    name: zenith-workload
+    namespace: database
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
