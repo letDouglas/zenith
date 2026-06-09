@@ -43,11 +43,11 @@ spec:
           image: ghcr.io/requarks/wiki:2
           resources:
             requests:
-              cpu: "100m"
-              memory: "256Mi"
+              cpu: "50m"
+              memory: "64Mi"
             limits:
-              cpu: "500m"
-              memory: "512Mi"
+              cpu: "512Mi"
+              memory: "500m"
           env:
             - name: DB_TYPE
               value: "postgres"
