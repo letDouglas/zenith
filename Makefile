@@ -1,6 +1,5 @@
 include .env
 export
-
 # ── versions ────────────────────────────────────────────────────────────────
 K3S_VERSION      = v1.27.4+k3s1
 CILIUM_VERSION   = 1.14.3
@@ -10,26 +9,19 @@ ARGOCD_VERSION   = 5.46.7
 VAULT_VERSION    = 0.28.0
 ESO_VERSION      = 0.9.11
 CNPG_VERSION     = 0.22.0
-
 # ── configuration ────────────────────────────────────────────────────────────
 MGMT_NODE        = zenith-mgmt-1
 WORKLOAD_NODES   = zenith-1 zenith-2 zenith-3
-
 KUBECONFIG_MGMT     = $(HOME)/.kube/clusters/zenith-mgmt
 KUBECONFIG_WORKLOAD = $(HOME)/.kube/clusters/zenith
-
 GITHUB_TOKEN ?= $(error Set GITHUB_TOKEN in .env)
 GITHUB_USER  ?= $(error Set GITHUB_USER in .env)
 GITHUB_REPO  ?= $(error Set GITHUB_REPO in .env)
-
 .PHONY: bootstrap-mgmt bootstrap-workload destroy-mgmt destroy-workload destroy
-
 # ── management cluster ───────────────────────────────────────────────────────
 bootstrap-mgmt: mgmt-vm-create mgmt-k3s-install mgmt-vault-install mgmt-argocd-install mgmt-done
-
 mgmt-vm-create:
 	multipass launch --name $(MGMT_NODE) --cpus 2 --memory 4G --disk 20G
-
 mgmt-k3s-install:
 	$(eval MGMT_IP := $(shell multipass info $(MGMT_NODE) --format json | jq -r '.info["$(MGMT_NODE)"].ipv4[0]'))
 	multipass exec $(MGMT_NODE) -- bash -c "\
@@ -40,7 +32,6 @@ mgmt-k3s-install:
 	multipass exec $(MGMT_NODE) -- sudo cat /etc/rancher/k3s/k3s.yaml \
 		| sed 's/127.0.0.1/$(MGMT_IP)/g' > $(KUBECONFIG_MGMT)
 	KUBECONFIG=$(KUBECONFIG_MGMT) kubectl config rename-context default zenith-mgmt
-
 mgmt-vault-install:
 	helm repo add hashicorp https://helm.releases.hashicorp.com 2>/dev/null || true
 	helm repo update hashicorp
@@ -50,7 +41,6 @@ mgmt-vault-install:
 		--create-namespace \
 		--values platform/management/helm/vault-values.yaml \
 		--wait --timeout=120s
-
 mgmt-argocd-install:
 	helm repo add argo https://argoproj.github.io/argo-helm 2>/dev/null || true
 	helm repo update argo
@@ -61,7 +51,6 @@ mgmt-argocd-install:
 		--values platform/management/helm/argocd-values.yaml \
 		--wait --timeout=120s
 	brew install argocd 2>/dev/null || true
-
 mgmt-done:
 	@echo ""
 	@echo "════════════════════════════════════════════════════════"
@@ -86,22 +75,18 @@ mgmt-done:
 	@echo ""
 	@echo " Then execute: make bootstrap-workload"
 	@echo ""
-
 destroy-mgmt:
 	multipass delete $(MGMT_NODE) --purge || true
 	rm -f $(KUBECONFIG_MGMT)
-
 # ── workload cluster ─────────────────────────────────────────────────────────
 bootstrap-workload: workload-vms-create workload-k3s-install workload-longhorn-prereq \
 	workload-cilium-install workload-cilium-config workload-cluster-wait \
 	workload-longhorn-install workload-traefik-install \
 	workload-vault-auth-config workload-argocd-bootstrap
-
 workload-vms-create:
 	multipass launch --name zenith-1 --cpus 2 --memory 3G --disk 20G
 	multipass launch --name zenith-2 --cpus 2 --memory 3G --disk 20G
 	multipass launch --name zenith-3 --cpus 2 --memory 3G --disk 20G
-
 workload-k3s-install:
 	$(eval SERVER_IP := $(shell multipass info zenith-1 --format json | jq -r '.info["zenith-1"].ipv4[0]'))
 	multipass exec zenith-1 -- bash -c "\
@@ -122,13 +107,11 @@ workload-k3s-install:
 		| sed 's/127.0.0.1/$(SERVER_IP)/g' > $(KUBECONFIG_WORKLOAD)
 	KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl config rename-context default zenith
 	rm -rf ~/.kube/cache
-
 workload-longhorn-prereq:
 	@for vm in zenith-1 zenith-2 zenith-3; do \
 		multipass exec $$vm -- sudo apt-get install -y open-iscsi nfs-common && \
 		multipass exec $$vm -- sudo systemctl enable --now iscsid; \
 	done
-
 workload-cilium-install:
 	$(eval API_IP := $(shell multipass info zenith-1 --format json | jq -r '.info["zenith-1"].ipv4[0]'))
 	helm repo add cilium https://helm.cilium.io/ 2>/dev/null || true
@@ -139,13 +122,13 @@ workload-cilium-install:
 		--set k8sServiceHost=$(API_IP) \
 		--set k8sServicePort=6443 \
 		--wait --timeout=120s
-
 workload-cilium-config:
-	KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl apply -f platform/workload/manifests/cilium/ipam.yaml
-
+	$(eval API_IP := $(shell multipass info zenith-1 --format json | jq -r '.info["zenith-1"].ipv4[0]'))
+	$(eval SUBNET := $(shell echo $(API_IP) | cut -d. -f1-3))
+	sed 's/192\.168\.64/$(SUBNET)/g' platform/workload/manifests/cilium/ipam.yaml \
+		| KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl apply -f -
 workload-cluster-wait:
 	KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl wait node --all --for=condition=Ready --timeout=180s
-
 workload-longhorn-install:
 	helm repo add longhorn https://charts.longhorn.io 2>/dev/null || true
 	helm repo update longhorn
@@ -155,17 +138,18 @@ workload-longhorn-install:
 		--create-namespace \
 		--values platform/workload/helm/longhorn-values.yaml \
 		--wait --timeout=300s
-
 workload-traefik-install:
+	$(eval API_IP := $(shell multipass info zenith-1 --format json | jq -r '.info["zenith-1"].ipv4[0]'))
+	$(eval SUBNET := $(shell echo $(API_IP) | cut -d. -f1-3))
 	helm repo add traefik https://traefik.github.io/charts 2>/dev/null || true
 	helm repo update traefik
-	KUBECONFIG=$(KUBECONFIG_WORKLOAD) helm upgrade --install traefik traefik/traefik \
-		--version $(TRAEFIK_VERSION) \
-		--namespace ingress-system \
-		--create-namespace \
-		--values platform/workload/helm/traefik-values.yaml \
-		--wait --timeout=120s
-
+	sed 's/192\.168\.64/$(SUBNET)/g' platform/workload/helm/traefik-values.yaml \
+		| KUBECONFIG=$(KUBECONFIG_WORKLOAD) helm upgrade --install traefik traefik/traefik \
+			--version $(TRAEFIK_VERSION) \
+			--namespace ingress-system \
+			--create-namespace \
+			--values /dev/stdin \
+			--wait --timeout=120s
 # ── vault kubernetes auth for the workload cluster ──────────────────────────
 workload-vault-auth-config:
 	$(eval WORKLOAD_API_IP := $(shell multipass info zenith-1 --format json | jq -r '.info["zenith-1"].ipv4[0]'))
@@ -204,18 +188,8 @@ workload-vault-auth-config:
 		bound_service_account_namespaces=database \
 		policies=database-policy \
 		ttl=1h
-
 workload-argocd-bootstrap:
 	$(eval MGMT_IP := $(shell multipass info $(MGMT_NODE) --format json | jq -r '.info["$(MGMT_NODE)"].ipv4[0]'))
-	# Dynamically updates the server URL in the secret-store manifest with the retrieved management IP and port.
-	# The pattern covers both the initial placeholder and any previously updated IP addresses.
-	sed -i.bak 's|server: "http://[^"]*"|server: "http://$(MGMT_IP):30820"|g' platform/workload/manifests/database/secret-store.yaml
-	rm -f platform/workload/manifests/database/secret-store.yaml.bak
-	# Commit and push the updated IP address before ArgoCD synchronization triggers
-	git add platform/workload/manifests/database/secret-store.yaml
-	git commit -m "chore: update vault server IP for bootstrap [skip ci]" || true
-	git push origin dev || true
-	# Register GitHub credentials within ArgoCD to grant repository access
 	KUBECONFIG=$(KUBECONFIG_MGMT) kubectl create secret generic github-creds \
 		--namespace argocd \
 		--from-literal=username=$(GITHUB_USER) \
@@ -224,32 +198,46 @@ workload-argocd-bootstrap:
 		--dry-run=client -o yaml | KUBECONFIG=$(KUBECONFIG_MGMT) kubectl apply -f -
 	KUBECONFIG=$(KUBECONFIG_MGMT) kubectl label secret github-creds -n argocd \
 		argocd.argoproj.io/secret-type=repository --overwrite
-	# Export the workload cluster kubeconfig context for ArgoCD registration
 	KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl config view --raw > /tmp/workload-kubeconfig.yaml
-	# Authenticate to ArgoCD via port-forwarding
 	KUBECONFIG=$(KUBECONFIG_MGMT) argocd login \
 		--port-forward --port-forward-namespace argocd --plaintext --insecure \
 		--username admin \
 		--password $$(KUBECONFIG=$(KUBECONFIG_MGMT) kubectl get secret argocd-initial-admin-secret \
 			-n argocd -o jsonpath='{.data.password}' | base64 -d)
-	# Register the workload cluster into ArgoCD under the name 'zenith-workload'
+	-KUBECONFIG=$(KUBECONFIG_MGMT) argocd cluster rm zenith-workload \
+		--port-forward \
+		--port-forward-namespace argocd \
+		--yes || true
 	KUBECONFIG=$(KUBECONFIG_MGMT) argocd cluster add zenith \
 		--kubeconfig /tmp/workload-kubeconfig.yaml \
 		--name zenith-workload \
 		--port-forward \
 		--port-forward-namespace argocd \
 		--yes
-	# Deploy the root application; ArgoCD will manage subsequent sync states autonomously from this point
 	KUBECONFIG=$(KUBECONFIG_MGMT) kubectl apply -f platform/workload/argocd-apps/root-app.yaml -n argocd
+	KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl wait namespace database --for=jsonpath='{.status.phase}'=Active --timeout=120s
+	# ─── ATTENDI IL WEBHOOK DI ESO PRIMA DI APPLICARE IL SECRET STORE ───
+	@until KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl get deployment/external-secrets-webhook -n external-secrets >/dev/null 2>&1; do sleep 2; done
+	KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl rollout status deployment/external-secrets-webhook -n external-secrets --timeout=120s
+	# ────────────────────────────────────────────────────────────────────
+	sed 's|server: "http://[^"]*"|server: "http://$(MGMT_IP):30820"|g' \
+		platform/workload/manifests/database/secret-store.yaml \
+		| KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl apply -f -
+	@until [ $$(KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl get svc traefik -n ingress-system -o jsonpath='{.status.loadBalancer.ingress[0].ip}') ]; do \
+		echo "Waiting for Traefik LoadBalancer IP..."; \
+		sleep 2; \
+	done
+	TRAEFIK_IP=$$(KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl get svc traefik \
+		-n ingress-system -o jsonpath='{.status.loadBalancer.ingress[0].ip}'); \
+	sed "s/192\.168\.64\.[0-9]*/$$TRAEFIK_IP/g" platform/workload/manifests/wikijs/ingress-service.yaml \
+		| KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl apply -f -
 	@echo ""
 	@echo "════════════════════════════════════════════════════════"
 	@echo " ✅ Bootstrap completed. ArgoCD is deploying the workload cluster."
 	@echo " Monitor execution with: KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl get pods -A -w"
 	@echo "════════════════════════════════════════════════════════"
 	@echo ""
-
 destroy-workload:
 	multipass delete zenith-1 zenith-2 zenith-3 --purge || true
 	rm -f $(KUBECONFIG_WORKLOAD)
-
 destroy: destroy-mgmt destroy-workload

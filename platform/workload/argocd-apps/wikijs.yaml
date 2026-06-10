@@ -9,6 +9,8 @@ spec:
     repoURL: https://github.com/letDouglas/zenith.git
     targetRevision: dev
     path: platform/workload/manifests/wikijs
+    directory:
+      exclude: 'ingress-service.yaml'
   destination:
     name: zenith-workload
     namespace: database

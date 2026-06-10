@@ -9,6 +9,8 @@ spec:
     repoURL: https://github.com/letDouglas/zenith.git
     targetRevision: dev
     path: platform/workload/manifests/database
+    directory:
+      exclude: 'secret-store.yaml'
   destination:
     name: zenith-workload
     namespace: database
