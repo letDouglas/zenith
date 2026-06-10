@@ -68,10 +68,11 @@ mgmt-done:
 	@echo " 3. Create the secret containing the root token:"
 	@echo "    KUBECONFIG=$(KUBECONFIG_MGMT) kubectl create secret generic vault-root-token -n vault --from-literal=token=<root-token>"
 	@echo ""
-	@echo " 4. Enable kv-v2 engine and store the database password in Vault:"
+	@echo " 4. Enable kv-v2 engine and store application secrets in Vault:"
 	@echo "    ROOT_TOKEN=<root-token>"
 	@echo "    KUBECONFIG=$(KUBECONFIG_MGMT) kubectl exec -n vault vault-0 -- env VAULT_TOKEN=\$$ROOT_TOKEN vault secrets enable -path=secret kv-v2"
 	@echo "    KUBECONFIG=$(KUBECONFIG_MGMT) kubectl exec -n vault vault-0 -- env VAULT_TOKEN=\$$ROOT_TOKEN vault kv put secret/postgres-credentials username=app_user password=<password>"
+	@echo "    KUBECONFIG=$(KUBECONFIG_MGMT) kubectl exec -n vault vault-0 -- env VAULT_TOKEN=\$$ROOT_TOKEN vault kv put secret/wikijs-credentials db_password=<password>"
 	@echo ""
 	@echo " Then execute: make bootstrap-workload"
 	@echo ""
@@ -125,6 +126,8 @@ workload-cilium-install:
 workload-cilium-config:
 	$(eval API_IP := $(shell multipass info zenith-1 --format json | jq -r '.info["zenith-1"].ipv4[0]'))
 	$(eval SUBNET := $(shell echo $(API_IP) | cut -d. -f1-3))
+	# Substitute the placeholder subnet with the runtime value before applying.
+	# The source file is never modified; substitution happens in-memory via a pipe.
 	sed 's/192\.168\.64/$(SUBNET)/g' platform/workload/manifests/cilium/ipam.yaml \
 		| KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl apply -f -
 workload-cluster-wait:
@@ -143,6 +146,8 @@ workload-traefik-install:
 	$(eval SUBNET := $(shell echo $(API_IP) | cut -d. -f1-3))
 	helm repo add traefik https://traefik.github.io/charts 2>/dev/null || true
 	helm repo update traefik
+	# Substitute the placeholder subnet with the runtime value and pipe directly
+	# into helm via /dev/stdin to avoid writing temporary files to disk.
 	sed 's/192\.168\.64/$(SUBNET)/g' platform/workload/helm/traefik-values.yaml \
 		| KUBECONFIG=$(KUBECONFIG_WORKLOAD) helm upgrade --install traefik traefik/traefik \
 			--version $(TRAEFIK_VERSION) \
@@ -166,6 +171,10 @@ workload-vault-auth-config:
 		--dry-run=client -o yaml | KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl apply -f -
 	KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl apply -f platform/workload/manifests/vault/token-reviewer-secret.yaml
 	sleep 8
+	# Copy the Vault policy to the pod and write it from a file to avoid
+	# heredoc/stdin issues with kubectl exec across different shell environments.
+	printf 'path "secret/data/postgres-credentials" { capabilities = ["read"] }\npath "secret/data/wikijs-credentials" { capabilities = ["read"] }\n' > /tmp/vault-policy.hcl
+	KUBECONFIG=$(KUBECONFIG_MGMT) kubectl cp /tmp/vault-policy.hcl vault/vault-0:/tmp/vault-policy.hcl
 	@REVIEWER_TOKEN=$$(KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl get secret vault-token-reviewer \
 		-n kube-system -o jsonpath='{.data.token}' | base64 -d); \
 	KUBECONFIG=$(KUBECONFIG_MGMT) kubectl exec -n vault vault-0 -- \
@@ -173,7 +182,7 @@ workload-vault-auth-config:
 		vault auth enable -path=kubernetes-workload kubernetes || true; \
 	KUBECONFIG=$(KUBECONFIG_MGMT) kubectl exec -n vault vault-0 -- \
 		env VAULT_TOKEN=$(ROOT_TOKEN) \
-		sh -c 'echo "path \"secret/data/postgres-credentials\" { capabilities = [\"read\"] }" | vault policy write database-policy -'; \
+		vault policy write database-policy /tmp/vault-policy.hcl; \
 	KUBECONFIG=$(KUBECONFIG_MGMT) kubectl exec -n vault vault-0 -- \
 		env VAULT_TOKEN=$(ROOT_TOKEN) \
 		vault write auth/kubernetes-workload/config \
@@ -190,6 +199,7 @@ workload-vault-auth-config:
 		ttl=1h
 workload-argocd-bootstrap:
 	$(eval MGMT_IP := $(shell multipass info $(MGMT_NODE) --format json | jq -r '.info["$(MGMT_NODE)"].ipv4[0]'))
+	# Register GitHub credentials in ArgoCD to grant repository access.
 	KUBECONFIG=$(KUBECONFIG_MGMT) kubectl create secret generic github-creds \
 		--namespace argocd \
 		--from-literal=username=$(GITHUB_USER) \
@@ -198,36 +208,45 @@ workload-argocd-bootstrap:
 		--dry-run=client -o yaml | KUBECONFIG=$(KUBECONFIG_MGMT) kubectl apply -f -
 	KUBECONFIG=$(KUBECONFIG_MGMT) kubectl label secret github-creds -n argocd \
 		argocd.argoproj.io/secret-type=repository --overwrite
+	# Export the workload cluster kubeconfig and register it into ArgoCD.
 	KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl config view --raw > /tmp/workload-kubeconfig.yaml
 	KUBECONFIG=$(KUBECONFIG_MGMT) argocd login \
 		--port-forward --port-forward-namespace argocd --plaintext --insecure \
 		--username admin \
 		--password $$(KUBECONFIG=$(KUBECONFIG_MGMT) kubectl get secret argocd-initial-admin-secret \
 			-n argocd -o jsonpath='{.data.password}' | base64 -d)
+	# Remove any stale cluster registration with the same name before re-adding.
+	# The leading dash tells make to ignore the non-zero exit code when no cluster exists yet.
 	-KUBECONFIG=$(KUBECONFIG_MGMT) argocd cluster rm zenith-workload \
-		--port-forward \
-		--port-forward-namespace argocd \
-		--yes || true
+		--port-forward --port-forward-namespace argocd --yes 2>/dev/null || true
 	KUBECONFIG=$(KUBECONFIG_MGMT) argocd cluster add zenith \
 		--kubeconfig /tmp/workload-kubeconfig.yaml \
 		--name zenith-workload \
 		--port-forward \
 		--port-forward-namespace argocd \
 		--yes
+	# Deploy the root app; ArgoCD creates all namespaces and resources from Git.
 	KUBECONFIG=$(KUBECONFIG_MGMT) kubectl apply -f platform/workload/argocd-apps/root-app.yaml -n argocd
-	KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl wait namespace database --for=jsonpath='{.status.phase}'=Active --timeout=120s
-	# ─── ATTENDI IL WEBHOOK DI ESO PRIMA DI APPLICARE IL SECRET STORE ───
-	@until KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl get deployment/external-secrets-webhook -n external-secrets >/dev/null 2>&1; do sleep 2; done
+	# kubectl wait fails immediately if the resource does not exist yet.
+	# Poll until ArgoCD creates the namespace before proceeding.
+	@echo "Waiting for ArgoCD to create namespace database..."
+	@until KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl get namespace database >/dev/null 2>&1; do sleep 5; done
+	# Wait for the ESO webhook deployment to be fully rolled out before applying
+	# the SecretStore, as the webhook validates the resource on admission.
+	@until KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl get deployment external-secrets-webhook -n external-secrets >/dev/null 2>&1; do sleep 2; done
 	KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl rollout status deployment/external-secrets-webhook -n external-secrets --timeout=120s
-	# ────────────────────────────────────────────────────────────────────
+	# Apply secret-store.yaml with the runtime Vault IP injected via sed.
+	# This file is excluded from ArgoCD sync (see postgres-database.yaml) to
+	# prevent the self-heal loop from overwriting the runtime IP with the Git placeholder.
 	sed 's|server: "http://[^"]*"|server: "http://$(MGMT_IP):30820"|g' \
 		platform/workload/manifests/database/secret-store.yaml \
 		| KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl apply -f -
-	@until [ $$(KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl get svc traefik -n ingress-system -o jsonpath='{.status.loadBalancer.ingress[0].ip}') ]; do \
-		echo "Waiting for Traefik LoadBalancer IP..."; \
-		sleep 2; \
-	done
-	TRAEFIK_IP=$$(KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl get svc traefik \
+	# Read the Traefik LoadBalancer IP assigned by Cilium at runtime and apply
+	# ingress-service.yaml with the correct host. This file is excluded from
+	# ArgoCD sync (see wikijs.yaml) to prevent self-heal conflicts.
+	@echo "Waiting for Traefik LoadBalancer IP..."
+	@until [ -n "$$(KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl get svc traefik -n ingress-system -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)" ]; do sleep 5; done
+	@TRAEFIK_IP=$$(KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl get svc traefik \
 		-n ingress-system -o jsonpath='{.status.loadBalancer.ingress[0].ip}'); \
 	sed "s/192\.168\.64\.[0-9]*/$$TRAEFIK_IP/g" platform/workload/manifests/wikijs/ingress-service.yaml \
 		| KUBECONFIG=$(KUBECONFIG_WORKLOAD) kubectl apply -f -
