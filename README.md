@@ -1,12 +1,31 @@
-# zenith
+# ⚡ zenith
 
-A professional bare-metal Kubernetes homelab environment, designed to mirror enterprise GitOps patterns.
+A production-grade Kubernetes homelab built on bare-metal VMs, mirroring enterprise GitOps patterns.
 
-Two-cluster architecture: a **management cluster** running ArgoCD and Vault, and a **workload cluster** running the actual applications.
+![ArgoCD Dashboard](./docs/assets/screenshots/argocd-dashboard.png)
+*ArgoCD "App of Apps" pattern orchestrating the entire Workload cluster.*
+
+Two-cluster architecture: a **management cluster** running ArgoCD and Vault, and a **workload cluster** running the actual applications — fully automated from a single `make` command.
 
 ---
 
-## stack
+## 🗂 table of contents
+
+- [stack](#-stack)
+- [architecture](#-architecture)
+- [prerequisites](#-prerequisites)
+- [kubeconfig setup](#-kubeconfig-setup)
+- [usage](#-usage)
+- [verify](#-verify)
+- [access the dashboards](#-access-the-dashboards)
+- [teardown](#-teardown)
+- [troubleshooting](#-troubleshooting)
+- [design decisions](#-design-decisions)
+- [roadmap](#-roadmap)
+
+---
+
+## 📦 stack
 
 | component | version | cluster |
 |---|---|---|
@@ -15,47 +34,76 @@ Two-cluster architecture: a **management cluster** running ArgoCD and Vault, and
 | Longhorn | 1.5.1 | workload |
 | Traefik | 26.0.0 | workload |
 | ArgoCD | 5.46.7 | management |
-| Vault | 0.28.0 (chart) | management |
+| Vault (HashiCorp) | 0.28.0 (chart) | management |
 | External Secrets Operator | 0.9.11 | workload |
 | CloudNativePG | 0.22.0 (chart) | workload |
+| Wiki.js | 2.x | workload |
 
 ---
 
-## architecture
+## 🏗 architecture
 
 ```
-┌─────────────────────────────┐     ┌─────────────────────────────────────┐
-│   management cluster        │     │   workload cluster                  │
-│   zenith-mgmt-1 (4GB)       │     │   zenith-1/2/3 (3GB each)           │
-│                             │     │                                     │
-│   ArgoCD ──────────────────────────► deploys everything below           │
-│   Vault  ◄──────────────────────────  ESO reads secrets                 │
-│                             │     │   CNPG + Postgres                   │
-│                             │     │   Longhorn + Cilium + Traefik       │
-└─────────────────────────────┘     └─────────────────────────────────────┘
+┌──────────────────────────────┐      ┌──────────────────────────────────────┐
+│   management cluster         │      │   workload cluster                   │
+│   zenith-mgmt-1  (4 GB RAM)  │      │   zenith-1 / 2 / 3  (3 GB RAM each) │
+│                              │      │                                      │
+│   ArgoCD ────────────────────────►  │  deploys all workload apps           │
+│   Vault  ◄───────────────────────── │  ESO pulls secrets at runtime        │
+│                              │      │                                      │
+│                              │      │  Cilium  (CNI + L2 LB)               │
+│                              │      │  Longhorn  (distributed storage)     │
+│                              │      │  Traefik  (ingress)                  │
+│                              │      │  CNPG  (Postgres HA cluster)         │
+│                              │      │  Wiki.js  (application)              │
+└──────────────────────────────┘      └──────────────────────────────────────┘
 ```
 
-Secrets flow:
+### 🔐 secrets flow
+
 ```
-Human puts password in Vault (once)
-  └── ESO syncs it as postgres-db-secret in namespace database
-        └── CNPG uses it to initialize app_db with app_user
+Operator stores credentials in Vault (once, manually)
+  └── External Secrets Operator reads from Vault every 15s
+        └── syncs them as Kubernetes Secrets in namespace `database`
+              ├── postgres-db-secret  →  consumed by CloudNativePG
+              └── wikijs-db-secret    →  consumed by Wiki.js
 ```
 
-**Why two clusters** — Vault lives on the management cluster which is never destroyed. The workload cluster can be destroyed and rebuilt at any time without touching secrets. No race conditions, no bootstrap jobs, no sync waves needed.
+### 🔄 GitOps flow
+
+```
+Git repository  (source of truth)
+  └── ArgoCD root-app  (App of Apps pattern)
+        ├── external-secrets  (ESO Helm chart)
+        ├── cnpg-operator     (CloudNativePG Helm chart)
+        ├── postgres-database (manifests — excludes secret-store.yaml)
+        └── wikijs            (manifests — excludes ingress-service.yaml)
+```
+
+> `secret-store.yaml` and `ingress-service.yaml` are excluded from ArgoCD sync and applied at bootstrap time with runtime IPs injected by the Makefile. This prevents ArgoCD's self-heal from overwriting dynamic values with Git placeholders.
 
 ---
 
-## prerequisites
+## ✅ prerequisites
+
+### macOS
 
 ```bash
 brew install --cask multipass
 brew install kubernetes-cli helm jq argocd
 ```
 
-Optional but recommended:
+### Linux
 
 ```bash
+snap install multipass
+# kubectl, helm, jq, argocd: follow their official install docs
+```
+
+### recommended tools
+
+```bash
+# macOS
 brew install danielfoehrkn/switch/switch
 brew install kubecolor
 brew install derailed/k9s/k9s
@@ -63,15 +111,15 @@ brew install derailed/k9s/k9s
 
 ---
 
-## kubeconfig setup
+## 🔧 kubeconfig setup
 
-The Makefile writes cluster configs to `~/.kube/clusters/`. Create the directory and register the paths:
+The Makefile writes cluster configs to `~/.kube/clusters/`. Create the directory first:
 
 ```bash
 mkdir -p ~/.kube/clusters
 ```
 
-Add to `~/.kube/kube-switch.yaml` (used by `switch`):
+If you use `switch`, register both paths in `~/.kube/kube-switch.yaml`:
 
 ```yaml
 - kind: filesystem
@@ -81,7 +129,7 @@ Add to `~/.kube/kube-switch.yaml` (used by `switch`):
     - ~/.kube/clusters/zenith
 ```
 
-Then switch between clusters with:
+Switch between clusters:
 
 ```bash
 switch zenith-mgmt   # management cluster
@@ -90,7 +138,7 @@ switch zenith        # workload cluster
 
 ---
 
-## usage
+## 🚀 usage
 
 ### step 1 — management cluster
 
@@ -98,41 +146,53 @@ switch zenith        # workload cluster
 make bootstrap-mgmt
 ```
 
-This creates the management VM, installs k3s, Vault, and ArgoCD.
+Creates the management VM, installs k3s, Vault, and ArgoCD.
 
-When done, complete these **one-time manual steps**:
+When complete, run these **one-time manual steps**:
 
-**Init and unseal Vault:**
+#### initialize and unseal Vault
+
 ```bash
 switch zenith-mgmt
 
+# Initialize — save the 5 unseal keys and root token in a password manager
 kubectl exec -n vault vault-0 -- vault operator init
-# Save the 5 unseal keys and root token somewhere safe (password manager)
 
+# Unseal — repeat 3 times with 3 different unseal keys
 kubectl exec -n vault vault-0 -- vault operator unseal
-# Repeat 3x with 3 different keys
 ```
 
-**Create the root token secret:**
+> ⚠️ If you lose the unseal keys, Vault data is unrecoverable. Store them securely.
+
+#### store the root token as a Kubernetes secret
+
 ```bash
 kubectl create secret generic vault-root-token \
   -n vault --from-literal=token=<root-token>
 ```
 
-**Enable kv-v2 and put the database credentials in Vault:**
+#### enable kv-v2 and populate secrets
+
 ```bash
 ROOT_TOKEN=<root-token>
 
+# Enable the KV-V2 secrets engine
 kubectl exec -n vault vault-0 -- \
   env VAULT_TOKEN=$ROOT_TOKEN vault secrets enable -path=secret kv-v2
 
+# Store Postgres credentials (username and password — both required by CNPG)
 kubectl exec -n vault vault-0 -- \
   env VAULT_TOKEN=$ROOT_TOKEN vault kv put secret/postgres-credentials \
   username=app_user \
   password=<your-password>
+
+# Store Wiki.js database password
+kubectl exec -n vault vault-0 -- \
+  env VAULT_TOKEN=$ROOT_TOKEN vault kv put secret/wikijs-credentials \
+  db_password=<your-password>
 ```
 
-> Both `username` and `password` must be stored in Vault. The ExternalSecret maps both fields into the Kubernetes secret consumed by CloudNativePG.
+---
 
 ### step 2 — workload cluster
 
@@ -140,147 +200,272 @@ kubectl exec -n vault vault-0 -- \
 make bootstrap-workload
 ```
 
-This creates 3 workload VMs, installs k3s + Cilium + Longhorn + Traefik, configures Vault Kubernetes auth for the workload cluster, registers it in ArgoCD, and applies the root-app.
+This single command:
 
-ArgoCD then automatically deploys ESO, CNPG, and Postgres. No further manual steps.
-
-**What `bootstrap-workload` does automatically:**
-
-- Creates a `vault-token-reviewer` ServiceAccount + long-lived token secret in the workload cluster
-- Copies the workload cluster CA cert into Vault
-- Enables the `kubernetes-workload` auth mount in Vault and writes the `database-policy`
-- Creates the `database-role` binding the `vault-auth-sa` ServiceAccount to the policy
-- Updates `secret-store.yaml` with the current management VM IP via `sed` and pushes to Git
-- Registers GitHub credentials and the workload cluster into ArgoCD
-- Deploys the root-app (App of Apps pattern)
+1. Creates 3 workload VMs (`zenith-1`, `zenith-2`, `zenith-3`)
+2. Installs k3s in HA mode with `--cluster-init`
+3. Installs Cilium (CNI + L2 LoadBalancer)
+4. Applies the Cilium IPAM pool with the correct runtime subnet
+5. Installs Longhorn (distributed block storage)
+6. Installs Traefik with the correct runtime LoadBalancer IP
+7. Configures Vault Kubernetes auth for the workload cluster
+8. Writes the Vault policy granting ESO read access to both secret paths
+9. Removes any stale ArgoCD cluster registration and re-registers the workload cluster
+10. Deploys the root-app — ArgoCD takes over from this point
+11. Waits for the `database` namespace to appear, then applies `secret-store.yaml` with the runtime Vault IP
+12. Waits for Traefik's LoadBalancer IP, then applies `ingress-service.yaml` with the correct `nip.io` hostname
 
 ---
 
-## verify
-
-Check everything is running:
+## 🔍 verify
 
 ```bash
 switch zenith
+
+# All pods should be Running
 kubectl get pods -A
-kubectl get pods -n database -w   # wait for all 3 postgres pods Running
-```
 
-Retrieve the synced database credentials:
+# Watch Postgres come up (3 instances)
+kubectl get pods -n database -w
 
-```bash
+# Check ExternalSecrets synced successfully
+kubectl get externalsecret -n database
+
+# Retrieve the synced Postgres password
 kubectl get secret postgres-db-secret -n database \
   -o jsonpath='{.data.password}' | base64 -d
-```
 
-Connect to the database:
-
-```bash
+# Connect to the database directly
 kubectl exec -it zenith-postgres-1 -n database -- \
   psql -U app_user -d app_db -h localhost
+
+# Check ArgoCD application health
+switch zenith-mgmt
+kubectl get applications -n argocd
 ```
 
 ---
 
-## teardown
+## 🖥 access the dashboards
 
-```bash
-make destroy-workload   # destroy workload cluster only
-make destroy-mgmt       # destroy management cluster only
-make destroy            # destroy everything
-```
-
----
-
-## troubleshooting
-
-### ExternalSecrets `permission denied` (403)
-
-Vault requires an explicit policy granting read access on the secret path. The policy is written automatically by `make bootstrap-workload`, but if you re-ran Vault init manually, check:
+### ArgoCD (management cluster)
 
 ```bash
 switch zenith-mgmt
 
-kubectl exec -n vault vault-0 -- \
-  env VAULT_TOKEN=<root-token> vault policy read database-policy
+# Get the admin password
+kubectl get secret argocd-initial-admin-secret -n argocd \
+  -o jsonpath='{.data.password}' | base64 -d && echo
+
+# Open a port-forward
+kubectl port-forward svc/argocd-server -n argocd 8080:443
 ```
 
-If missing, re-apply:
+Open **https://localhost:8080** — username: `admin`.
+
+---
+
+### Wiki.js (workload cluster)
+
+The final application running with HA Postgres and persistent storage.
+
+![alt text](./docs/assets/screenshots/wikijs-setup.png)
 
 ```bash
-kubectl exec -n vault vault-0 -- \
-  env VAULT_TOKEN=<root-token> \
-  sh -c 'echo "path \"secret/data/postgres-credentials\" { capabilities = [\"read\"] }" \
-  | vault policy write database-policy -'
+switch zenith
+
+# Get the dynamic nip.io URL
+kubectl get ingress wikijs -n database \
+  -o jsonpath='{.spec.rules[0].host}'
 ```
 
-### Postgres pod stuck in Init
+Open `http://wiki.<traefik-ip>.nip.io` in your browser.
 
-The CNPG cluster pod stays in `Init` if the `postgres-db-secret` is not yet synced. Check the ExternalSecret status first:
+> **Corporate VPN workaround:** traffic to `192.168.252.x` may be routed through the VPN tunnel instead of the local Multipass bridge. Use port-forward instead:
+> ```bash
+> kubectl port-forward svc/wikijs -n database 3000:3000
+> # open http://localhost:3000
+> ```
+
+---
+
+## 🧹 teardown
 
 ```bash
+make destroy-workload   # destroy workload cluster only (management intact)
+make destroy-mgmt       # destroy management cluster only
+make destroy            # destroy everything
+```
+
+> Destroying the workload cluster does **not** affect Vault or ArgoCD on the management cluster. You can run `make bootstrap-workload` again without repeating the Vault setup.
+
+---
+
+## 🛠 troubleshooting
+
+### ExternalSecret stuck in `SecretSyncedError` (403 permission denied)
+
+Vault's Kubernetes auth role grants access only to the paths listed in `database-policy`. If a path is missing, ESO gets a 403.
+
+Verify the current policy:
+
+```bash
+switch zenith-mgmt
+ROOT_TOKEN=$(kubectl get secret vault-root-token -n vault \
+  -o jsonpath='{.data.token}' | base64 -d)
+
+kubectl exec -n vault vault-0 -- \
+  env VAULT_TOKEN=$ROOT_TOKEN vault policy read database-policy
+```
+
+Expected output:
+
+```hcl
+path "secret/data/postgres-credentials" { capabilities = ["read"] }
+path "secret/data/wikijs-credentials"   { capabilities = ["read"] }
+```
+
+If a path is missing, re-run `make workload-vault-auth-config`.
+
+---
+
+### ExternalSecret cached stale error — force a refresh
+
+ESO caches errors between reconcile cycles. Force an immediate retry:
+
+```bash
+switch zenith
+kubectl annotate externalsecret <name> -n database \
+  force-sync=$(date +%s) --overwrite
+```
+
+---
+
+### Postgres pod stuck in `Init:0/1`
+
+The CNPG init pod waits for `postgres-db-secret` to exist. Check the ExternalSecret first:
+
+```bash
+switch zenith
+kubectl get externalsecret -n database
 kubectl describe externalsecret postgres-password-sync -n database
 ```
 
-If the secret exists but Postgres still won't start, the pod may be stuck in exponential backoff. Force a retry by deleting the pod:
+Once the secret syncs the pod proceeds automatically. If it stays stuck in backoff, force a restart:
 
 ```bash
 kubectl delete pod -n database -l cnpg.io/cluster=zenith-postgres
 ```
 
-### Vault IP changes after VM recreation
+---
 
-Multipass assigns a new IP each time a VM is created. `make bootstrap-workload` handles this automatically via `sed` — it rewrites the `server` field in `secret-store.yaml` and pushes the change to Git before ArgoCD syncs. If you run Vault-related steps manually, update the file yourself:
+### Wiki.js stuck in `Init:CreateContainerConfigError`
+
+`wikijs-db-secret` does not exist yet. Check that `wikijs-credentials` was stored in Vault and that the ExternalSecret synced:
 
 ```bash
-MGMT_IP=$(multipass info zenith-mgmt-1 --format json | jq -r '.info["zenith-mgmt-1"].ipv4[0]')
-sed -i '' 's|server: "http://[^"]*"|server: "http://'"$MGMT_IP"':30820"|g' \
-  platform/workload/manifests/database/secret-store.yaml
-git add platform/workload/manifests/database/secret-store.yaml
-git commit -m "chore: update vault server IP"
-git push origin dev
+switch zenith
+kubectl get externalsecret wikijs-secrets-sync -n database
+kubectl logs -n external-secrets \
+  -l app.kubernetes.io/name=external-secrets --tail=30
 ```
+
+---
+
+### Vault IP changes after VM recreation
+
+Multipass assigns a new IP every time a VM is created. `make bootstrap-workload` handles this automatically. To fix manually without rebuilding:
+
+```bash
+switch zenith
+MGMT_IP=$(multipass info zenith-mgmt-1 --format json | \
+  jq -r '.info["zenith-mgmt-1"].ipv4[0]')
+
+kubectl patch secretstore vault-backend -n database --type=merge \
+  -p "{\"spec\":{\"provider\":{\"vault\":{\"server\":\"http://$MGMT_IP:30820\"}}}}"
+```
+
+---
+
+### ArgoCD shows duplicate `zenith-workload` cluster (Unknown status)
+
+This happens when the workload cluster is destroyed and recreated — the old IP registration persists in ArgoCD. The Makefile removes it automatically. To fix manually:
+
+```bash
+switch zenith-mgmt
+argocd cluster list --port-forward --port-forward-namespace argocd
+argocd cluster rm <old-server-url> \
+  --port-forward --port-forward-namespace argocd --yes
+```
+
+---
+
+### Vault sealed after management VM restart
+
+Vault does not auto-unseal. After any reboot of `zenith-mgmt-1`:
+
+```bash
+switch zenith-mgmt
+kubectl exec -n vault vault-0 -- vault operator unseal   # repeat 3x
+```
+
+---
 
 ### Makefile `missing separator` error
 
-Make requires real TAB characters (not spaces) to indent recipe lines. Copy-pasting from a browser often converts tabs to spaces. Verify with:
+Make requires real TAB characters on recipe lines — not spaces. Copy-pasting from a browser often silently converts them. Check with:
 
 ```bash
-cat -t Makefile | grep -n "^\^I"   # lines starting with a real tab show ^I
+cat -A Makefile | grep -n "^ "
 ```
 
-Fix in your editor by enabling "show invisibles" and replacing any leading spaces on recipe lines with tabs.
-
-### CNPG password not reloading after Vault rotation
-
-CNPG only reloads credentials from a Secret if the Secret carries the label `cnpg.io/reload: "true"`. This label is already present in the `ExternalSecret` template in `platform/workload/manifests/database/external-secret.yaml`. If you recreated the ExternalSecret manually and omitted the label, add it back and let ArgoCD reconcile.
+Fix in your editor by enabling visible whitespace and replacing leading spaces with tabs on recipe lines.
 
 ---
 
-## design notes
+## 🧠 design decisions
 
-**Why multipass** — Longhorn requires `open-iscsi` on the actual node host. Docker-based tools (k3d, kind, minikube) can't provide this. Multipass creates real Ubuntu VMs where `apt-get install open-iscsi` works.
+**Why two clusters**
+Vault lives on the management cluster, which is never destroyed. The workload cluster can be torn down and rebuilt at any time without losing secrets or ArgoCD state. This cleanly separates infrastructure lifecycle from application lifecycle.
 
-**Cilium without kube-proxy** — `--disable-kube-proxy` doesn't exist in k3s v1.27. Setting `kubeProxyReplacement: strict` in Cilium's Helm values is sufficient.
+**Why Multipass instead of k3d/kind**
+Longhorn requires `open-iscsi` installed on the actual node host. Container-based Kubernetes tools run nodes as Docker containers — `apt-get install open-iscsi` does not work inside them. Multipass creates real Ubuntu VMs where the full kernel module stack is available.
 
-**Vault Kubernetes auth (cross-cluster)** — Vault on the management cluster validates workload Pod identities by calling the workload API server using a long-lived `vault-token-reviewer` token. This is necessary because Vault cannot use its own cluster's CA to verify tokens from a different cluster (`disable_local_ca_jwt=true`).
+**Why no Sync Waves**
+A hybrid approach with `initContainers` and a Makefile runtime orchestrator was chosen over ArgoCD Sync Waves for three reasons:
+1. **Dynamic IPs** — ArgoCD cannot handle Multipass IPs that change on every VM recreation. The Makefile injects them at runtime.
+2. **Clean Git** — dynamic manifests are excluded from ArgoCD sync to avoid polluting the repository with ephemeral IP commits.
+3. **Runtime resilience** — Sync Waves only check dependencies at deploy time. The `initContainer` checks database role availability on every pod start, ensuring true self-healing across restarts.
 
-**Placeholder IP in Git** — `secret-store.yaml` stores a placeholder URL for the Vault server. The Makefile resolves the real IP at bootstrap time and commits the result before ArgoCD syncs. Never hardcode an IP directly in the repository; Multipass IPs change on every VM recreation.
+**Why Cilium's L2 LoadBalancer instead of MetalLB**
+Cilium already serves as the CNI. Using its built-in L2 announcement avoids running a second component for the same job.
 
-**ExternalSecret field mapping** — CNPG requires a Secret with both a `username` and a `password` key. The ExternalSecret explicitly maps both properties from the single Vault KV entry at `secret/postgres-credentials`.
+**Runtime IP injection without Git commits**
+`secret-store.yaml` and `traefik-values.yaml` contain placeholder IPs in Git. The Makefile resolves the real IPs at bootstrap time via `sed` and pipes the result directly to `kubectl apply` or `helm --values /dev/stdin` — never writing to disk or committing to Git. This keeps the repository portable for anyone who clones it.
+
+**Excluding files from ArgoCD sync**
+`secret-store.yaml` and `ingress-service.yaml` are excluded via `directory.exclude` in their respective ArgoCD Applications. Without this, `selfHeal: true` would immediately overwrite the runtime IP with the Git placeholder on every reconcile cycle.
+
+**Vault cross-cluster Kubernetes auth**
+Vault on the management cluster validates workload Pod identities by calling the workload cluster's API server with a long-lived `vault-token-reviewer` token. `disable_local_ca_jwt=true` is required because Vault cannot use its own cluster's JWT validation for a different cluster.
+
+**CNPG secret format**
+CloudNativePG requires a Secret containing both a `username` and a `password` key. The ExternalSecret explicitly maps both properties from the single Vault KV entry at `secret/postgres-credentials`.
+
+**Wiki.js init container**
+The Wiki.js Deployment includes an init container that waits for the `wikijs` Postgres role to exist before the main container starts. This eliminates the race condition between CNPG role creation and application startup.
 
 ---
 
-## roadmap
+## 🗺 roadmap
 
-- [x] Cilium CNI
-- [x] Longhorn storage
+- [x] Cilium CNI + L2 LoadBalancer
+- [x] Longhorn distributed storage
 - [x] Traefik ingress
-- [x] ArgoCD GitOps
-- [x] Vault secrets management (management cluster)
+- [x] ArgoCD GitOps (App of Apps)
+- [x] Vault secrets management
 - [x] External Secrets Operator
-- [x] CloudNativePG
-- [ ] Gitea (Git server using the Postgres cluster)
-- [ ] Ingress routes (ArgoCD UI, Longhorn UI, Vault UI)
-- [ ] Monitoring (?)
-- [ ] Backup (CNPG backups to S3/MinIO)
+- [x] CloudNativePG HA Postgres cluster
+- [x] Wiki.js
+- [ ] Monitoring (Prometheus + Grafana)
+- [ ] CNPG backups to S3-compatible storage (MinIO)
